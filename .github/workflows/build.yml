@@ -59,7 +59,10 @@ jobs:
           make -C "$PWD" O="$OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" \
                k61v1_64_archytas_defconfig
-          "$OUT/scripts/config" --file "$OUT/.config" --disable CONFIG_KSU
+          # scripts/config lives in the kernel source tree root (not in O= dir)
+          KCONFIG="$PWD/scripts/config"
+          [[ -x "$KCONFIG" ]] || KCONFIG="perl $KCONFIG"
+          $KCONFIG --file "$OUT/.config" --disable CONFIG_KSU
           make -C "$PWD" O="$OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" olddefconfig
           make -C "$PWD" O="$OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
