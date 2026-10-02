@@ -45,7 +45,9 @@ jobs:
         env:
           JOBS: "4"
           CROSS_COMPILE: aarch64-linux-gnu-
-          # Keep compiler warnings non-fatal for the old 4.9 tree under a modern GCC.
+          # Old 4.9 tree under a modern GCC: keep both target and host-tool warnings non-fatal.
+          HOSTCFLAGS: "-fcommon -Wno-error"
+          HOSTCXXFLAGS: "-fcommon -Wno-error"
           KCFLAGS: "-Wno-error"
         run: |
           # Replicate build_archimedes.sh's proven steps but with the Archytas defconfig
@@ -55,13 +57,13 @@ jobs:
           mkdir -p "$OUT/include"
           ln -sfn "$PWD/include/dt-bindings" "$OUT/include/dt-bindings"
           make -C "$PWD" O="$OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-               HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon \
+               HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" \
                k61v1_64_archytas_defconfig
           "$OUT/scripts/config" --file "$OUT/.config" --disable CONFIG_KSU
           make -C "$PWD" O="$OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-               HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon olddefconfig
+               HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" olddefconfig
           make -C "$PWD" O="$OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-               HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon KCFLAGS="-Wno-error" \
+               HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" KCFLAGS="-Wno-error" \
                -j"$JOBS" Image.gz-dtb
           ls -l "$OUT/arch/arm64/boot/Image.gz-dtb"
 
