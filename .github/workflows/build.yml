@@ -2,6 +2,15 @@ name: Build Archytas (Wi-Fi) 64-bit Kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      build_stage:
+        description: 'Which boot image to build'
+        type: choice
+        options:
+          - both
+          - stage1
+          - stage2
+        default: both
   push:
     branches: [ main ]
   pull_request:
@@ -70,23 +79,39 @@ jobs:
                -j"$JOBS" Image.gz-dtb
           ls -l "$OUT/arch/arm64/boot/Image.gz-dtb"
 
-      - name: Package Stage 1 (4G template DTB, fastest to verify same-PCB boot)
+      - name: Package boot images
+        env:
+          STAGE: ${{ github.event.inputs.build_stage || 'both' }}
+          KERNEL: kernel/out-archytas/arch/arm64/boot/Image.gz-dtb
+          TPL: kernel/tools/archimedes-boot-template-32MiB.img
         run: |
-          python3 kernel/package_archimedes_boot.py \
-            --template kernel/tools/archimedes-boot-template-32MiB.img \
-            --kernel   kernel/out-archytas/arch/arm64/boot/Image.gz-dtb \
-            --output  boot-archytas-wifi-stage1.img
-          python3 port/make_wifi_template.py \
-            --template kernel/tools/archimedes-boot-template-32MiB.img \
-            --wifi-dtb port/wifi_stock.dtb \
-            --output  wifi-template-32MiB.img
-
-      - name: Package Stage 2 (Wi-Fi DTB swapped in, proper port)
-        run: |
-          python3 kernel/package_archimedes_boot.py \
-            --template wifi-template-32MiB.img \
-            --kernel   kernel/out-archytas/arch/arm64/boot/Image.gz-dtb \
-            --output  boot-archytas-wifi.img
+          # Build selector: both (default) / stage1 / stage2
+          case "$STAGE" in
+            stage1)
+              python3 kernel/package_archimedes_boot.py \
+                --template "$TPL" --kernel "$KERNEL" \
+                --output boot-archytas-wifi-stage1.img
+              ;;
+            stage2)
+              python3 port/make_wifi_template.py \
+                --template "$TPL" --wifi-dtb port/wifi_stock.dtb \
+                --output wifi-template-32MiB.img
+              python3 kernel/package_archimedes_boot.py \
+                --template wifi-template-32MiB.img --kernel "$KERNEL" \
+                --output boot-archytas-wifi.img
+              ;;
+            *)
+              python3 kernel/package_archimedes_boot.py \
+                --template "$TPL" --kernel "$KERNEL" \
+                --output boot-archytas-wifi-stage1.img
+              python3 port/make_wifi_template.py \
+                --template "$TPL" --wifi-dtb port/wifi_stock.dtb \
+                --output wifi-template-32MiB.img
+              python3 kernel/package_archimedes_boot.py \
+                --template wifi-template-32MiB.img --kernel "$KERNEL" \
+                --output boot-archytas-wifi.img
+              ;;
+          esac
 
       - name: Upload boot images
         uses: actions/upload-artifact@v4
@@ -95,7 +120,7 @@ jobs:
           path: |
             boot-archytas-wifi-stage1.img
             boot-archytas-wifi.img
-          if-no-files-found: error
+          if-no-files-found: ignore
 
 # Flashing notes (not done by CI):
 #   - Flash boot-archytas-wifi.img (or stage1) to the boot partition with MTKClient.
