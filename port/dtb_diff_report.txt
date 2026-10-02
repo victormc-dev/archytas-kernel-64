@@ -1,0 +1,878 @@
+======================================================================
+DTB 全量对比:  4G模板(dtbo_internal.dtb)  vs  Wi-Fi版(wifi_stock.dtb)
+======================================================================
+4G 节点数: 288 | Wi-Fi 节点数: 494 | 共同: 2
+
+【1】仅在 4G 模板出现 (286):
+    - /__fixups__
+    - /__local_fixups__
+    - /__local_fixups__/fragment@14
+    - /__local_fixups__/fragment@14/__overlay__
+    - /__local_fixups__/fragment@15
+    - /__local_fixups__/fragment@15/__overlay__
+    - /__local_fixups__/fragment@18
+    - /__local_fixups__/fragment@18/__overlay__
+    - /__local_fixups__/fragment@21
+    - /__local_fixups__/fragment@21/__overlay__
+    - /__local_fixups__/fragment@23
+    - /__local_fixups__/fragment@23/__overlay__
+    - /__local_fixups__/fragment@5
+    - /__local_fixups__/fragment@5/__overlay__
+    - /__local_fixups__/fragment@7
+    - /__local_fixups__/fragment@7/__overlay__
+    - /fragment@0
+    - /fragment@0/__overlay__
+    - /fragment@1
+    - /fragment@1/__overlay__
+    - /fragment@1/__overlay__/gse_1
+    - /fragment@1/__overlay__/led@0
+    - /fragment@1/__overlay__/led@1
+    - /fragment@1/__overlay__/led@2
+    - /fragment@1/__overlay__/led@3
+    - /fragment@1/__overlay__/led@4
+    - /fragment@1/__overlay__/led@5
+    - /fragment@1/__overlay__/led@6
+    - /fragment@1/__overlay__/vibrator@0
+    - /fragment@10
+    - /fragment@10/__overlay__
+    - /fragment@11
+    - /fragment@11/__overlay__
+    - /fragment@11/__overlay__/bq2560x@6B
+    - /fragment@11/__overlay__/rt9465@4b
+    - /fragment@12
+    - /fragment@12/__overlay__
+    - /fragment@13
+    - /fragment@13/__overlay__
+    - /fragment@13/__overlay__/consys_default
+    - /fragment@13/__overlay__/gpslna@0
+    - /fragment@13/__overlay__/gpslna@0/pins_cmd_dat
+    - /fragment@13/__overlay__/gpslna@1
+    - /fragment@13/__overlay__/gpslna@1/pins_cmd_dat
+    - /fragment@13/__overlay__/gpslna@2
+    - /fragment@13/__overlay__/gpslna@2/pins_cmd_dat
+    - /fragment@14
+    - /fragment@14/__overlay__
+    - /fragment@15
+    - /fragment@15/__overlay__
+    - /fragment@16
+    - /fragment@16/__overlay__
+    - /fragment@16/__overlay__/aud_clk_miso_off
+    - /fragment@16/__overlay__/aud_clk_miso_off/pins_cmd0_dat
+    - /fragment@16/__overlay__/aud_clk_miso_on
+    - /fragment@16/__overlay__/aud_clk_miso_on/pins_cmd0_dat
+    - /fragment@16/__overlay__/aud_clk_mosi_off
+    - /fragment@16/__overlay__/aud_clk_mosi_off/pins_cmd0_dat
+    - /fragment@16/__overlay__/aud_clk_mosi_on
+    - /fragment@16/__overlay__/aud_clk_mosi_on/pins_cmd0_dat
+    - /fragment@16/__overlay__/aud_dat_miso_off
+    - /fragment@16/__overlay__/aud_dat_miso_off/pins_cmd1_dat
+    - /fragment@16/__overlay__/aud_dat_miso_off/pins_cmd2_dat
+    - /fragment@16/__overlay__/aud_dat_miso_on
+    - /fragment@16/__overlay__/aud_dat_miso_on/pins_cmd1_dat
+    - /fragment@16/__overlay__/aud_dat_miso_on/pins_cmd2_dat
+    - /fragment@16/__overlay__/aud_dat_mosi_off
+    - /fragment@16/__overlay__/aud_dat_mosi_off/pins_cmd1_dat
+    - /fragment@16/__overlay__/aud_dat_mosi_off/pins_cmd2_dat
+    - /fragment@16/__overlay__/aud_dat_mosi_on
+    - /fragment@16/__overlay__/aud_dat_mosi_on/pins_cmd1_dat
+    - /fragment@16/__overlay__/aud_dat_mosi_on/pins_cmd2_dat
+    - /fragment@16/__overlay__/aud_pins_smartpa_off
+    - /fragment@16/__overlay__/aud_pins_smartpa_off/pins_cmd0_dat
+    - /fragment@16/__overlay__/aud_pins_smartpa_off/pins_cmd1_dat
+    - /fragment@16/__overlay__/aud_pins_smartpa_off/pins_cmd2_dat
+    - /fragment@16/__overlay__/aud_pins_smartpa_off/pins_cmd3_dat
+    - /fragment@16/__overlay__/aud_pins_smartpa_on
+    - /fragment@16/__overlay__/aud_pins_smartpa_on/pins_cmd0_dat
+    - /fragment@16/__overlay__/aud_pins_smartpa_on/pins_cmd1_dat
+    - /fragment@16/__overlay__/aud_pins_smartpa_on/pins_cmd2_dat
+    - /fragment@16/__overlay__/aud_pins_smartpa_on/pins_cmd3_dat
+    - /fragment@17
+    - /fragment@17/__overlay__
+    - /fragment@17/__overlay__/alsps@10
+    - /fragment@17/__overlay__/aw87329_pa@58
+    - /fragment@17/__overlay__/gsensor@19
+    - /fragment@18
+    - /fragment@18/__overlay__
+    - /fragment@19
+    - /fragment@19/__overlay__
+    - /fragment@19/__overlay__/aw87329_rst_high
+    - /fragment@19/__overlay__/aw87329_rst_high/pins_cmd_dat
+    - /fragment@19/__overlay__/aw87329_rst_low
+    - /fragment@19/__overlay__/aw87329_rst_low/pins_cmd_dat
+    - /fragment@2
+    - /fragment@2/__overlay__
+    - /fragment@2/__overlay__/mtk-usb@60
+    - /fragment@20
+    - /fragment@20/__overlay__
+    - /fragment@20/__overlay__/cam0@0
+    - /fragment@20/__overlay__/cam0@0/pins_cmd_dat
+    - /fragment@20/__overlay__/cam0@1
+    - /fragment@20/__overlay__/cam0@1/pins_cmd_dat
+    - /fragment@20/__overlay__/cam0@2
+    - /fragment@20/__overlay__/cam0@2/pins_cmd_dat
+    - /fragment@20/__overlay__/cam0@3
+    - /fragment@20/__overlay__/cam0@3/pins_cmd_dat
+    - /fragment@20/__overlay__/cam0@vcamd0
+    - /fragment@20/__overlay__/cam0@vcamd0/pins_cmd_dat
+    - /fragment@20/__overlay__/cam0@vcamd1
+    - /fragment@20/__overlay__/cam0@vcamd1/pins_cmd_dat
+    - /fragment@20/__overlay__/cam1@0
+    - /fragment@20/__overlay__/cam1@0/pins_cmd_dat
+    - /fragment@20/__overlay__/cam1@1
+    - /fragment@20/__overlay__/cam1@1/pins_cmd_dat
+    - /fragment@20/__overlay__/cam1@2
+    - /fragment@20/__overlay__/cam1@2/pins_cmd_dat
+    - /fragment@20/__overlay__/cam1@3
+    - /fragment@20/__overlay__/cam1@3/pins_cmd_dat
+    - /fragment@20/__overlay__/cam1@vcama0
+    - /fragment@20/__overlay__/cam1@vcama0/pins_cmd_dat
+    - /fragment@20/__overlay__/cam1@vcama1
+    - /fragment@20/__overlay__/cam1@vcama1/pins_cmd_dat
+    - /fragment@20/__overlay__/cam1@vcamd0
+    - /fragment@20/__overlay__/cam1@vcamd0/pins_cmd_dat
+    - /fragment@20/__overlay__/cam1@vcamd1
+    - /fragment@20/__overlay__/cam1@vcamd1/pins_cmd_dat
+    - /fragment@20/__overlay__/cam2@0
+    - /fragment@20/__overlay__/cam2@0/pins_cmd_dat
+    - /fragment@20/__overlay__/cam2@1
+    - /fragment@20/__overlay__/cam2@1/pins_cmd_dat
+    - /fragment@20/__overlay__/cam2@2
+    - /fragment@20/__overlay__/cam2@2/pins_cmd_dat
+    - /fragment@20/__overlay__/cam2@3
+    - /fragment@20/__overlay__/cam2@3/pins_cmd_dat
+    - /fragment@20/__overlay__/cam2@vcama0
+    - /fragment@20/__overlay__/cam2@vcama0/pins_cmd_dat
+    - /fragment@20/__overlay__/cam2@vcama1
+    - /fragment@20/__overlay__/cam2@vcama1/pins_cmd_dat
+    - /fragment@20/__overlay__/camdefault
+    - /fragment@20/__overlay__/camera_pins_cam0_mclk_off
+    - /fragment@20/__overlay__/camera_pins_cam0_mclk_off/pins_cmd_dat
+    - /fragment@20/__overlay__/camera_pins_cam0_mclk_on
+    - /fragment@20/__overlay__/camera_pins_cam0_mclk_on/pins_cmd_dat
+    - /fragment@20/__overlay__/camera_pins_cam1_mclk_off
+    - /fragment@20/__overlay__/camera_pins_cam1_mclk_off/pins_cmd_dat
+    - /fragment@20/__overlay__/camera_pins_cam1_mclk_on
+    - /fragment@20/__overlay__/camera_pins_cam1_mclk_on/pins_cmd_dat
+    - /fragment@20/__overlay__/camera_pins_cam2_mclk_off
+    - /fragment@20/__overlay__/camera_pins_cam2_mclk_off/pins_cmd_dat
+    - /fragment@20/__overlay__/camera_pins_cam2_mclk_on
+    - /fragment@20/__overlay__/camera_pins_cam2_mclk_on/pins_cmd_dat
+    - /fragment@21
+    - /fragment@21/__overlay__
+    - /fragment@22
+    - /fragment@22/__overlay__
+    - /fragment@22/__overlay__/lcm_rst_out0_gpio
+    - /fragment@22/__overlay__/lcm_rst_out0_gpio/pins_cmd_dat
+    - /fragment@22/__overlay__/lcm_rst_out1_gpio
+    - /fragment@22/__overlay__/lcm_rst_out1_gpio/pins_cmd_dat
+    - /fragment@23
+    - /fragment@23/__overlay__
+    - /fragment@24
+    - /fragment@24/__overlay__
+    - /fragment@24/__overlay__/adc_channel@
+    - /fragment@25
+    - /fragment@25/__overlay__
+    - /fragment@26
+    - /fragment@26/__overlay__
+    - /fragment@26/__overlay__/cap_touch@38
+    - /fragment@27
+    - /fragment@27/__overlay__
+    - /fragment@27/__overlay__/alsps@10
+    - /fragment@27/__overlay__/gsensor@19
+    - /fragment@28
+    - /fragment@28/__overlay__
+    - /fragment@28/__overlay__/camera_main@1a
+    - /fragment@28/__overlay__/camera_main_af@0c
+    - /fragment@28/__overlay__/camera_main_eeprom@50
+    - /fragment@29
+    - /fragment@29/__overlay__
+    - /fragment@29/__overlay__/ext_buck_lp4@57
+    - /fragment@29/__overlay__/ext_buck_lp4x@50
+    - /fragment@29/__overlay__/nfc@08
+    - /fragment@29/__overlay__/slave_charger@4b
+    - /fragment@29/__overlay__/speaker_amp@34
+    - /fragment@3
+    - /fragment@3/__overlay__
+    - /fragment@3/__overlay__/ext_buck_lp4@57
+    - /fragment@3/__overlay__/ext_buck_lp4x@50
+    - /fragment@30
+    - /fragment@30/__overlay__
+    - /fragment@30/__overlay__/camera_sub@2d
+    - /fragment@30/__overlay__/camera_sub_eeprom@52
+    - /fragment@31
+    - /fragment@31/__overlay__
+    - /fragment@31/__overlay__/subpmic_pmu@34
+    - /fragment@31/__overlay__/usb_type_c@4e
+    - /fragment@32
+    - /fragment@32/__overlay__
+    - /fragment@32/__overlay__/camera_main_two@2d
+    - /fragment@32/__overlay__/camera_main_two_af@0c
+    - /fragment@32/__overlay__/camera_main_two_eeprom@50
+    - /fragment@32/__overlay__/ext_buck_vgpu@55
+    - /fragment@33
+    - /fragment@33/__overlay__
+    - /fragment@34
+    - /fragment@34/__overlay__
+    - /fragment@35
+    - /fragment@35/__overlay__
+    - /fragment@36
+    - /fragment@36/__overlay__
+    - /fragment@37
+    - /fragment@37/__overlay__
+    - /fragment@38
+    - /fragment@38/__overlay__
+    - /fragment@39
+    - /fragment@39/__overlay__
+    - /fragment@4
+    - /fragment@4/__overlay__
+    - /fragment@4/__overlay__/ext_buck_vgpu@55
+    - /fragment@40
+    - /fragment@40/__overlay__
+    - /fragment@41
+    - /fragment@41/__overlay__
+    - /fragment@42
+    - /fragment@42/__overlay__
+    - /fragment@43
+    - /fragment@43/__overlay__
+    - /fragment@44
+    - /fragment@44/__overlay__
+    - /fragment@45
+    - /fragment@45/__overlay__
+    - /fragment@46
+    - /fragment@46/__overlay__
+    - /fragment@47
+    - /fragment@47/__overlay__
+    - /fragment@48
+    - /fragment@48/__overlay__
+    - /fragment@49
+    - /fragment@49/__overlay__
+    - /fragment@5
+    - /fragment@5/__overlay__
+    - /fragment@50
+    - /fragment@50/__overlay__
+    - /fragment@51
+    - /fragment@51/__overlay__
+    - /fragment@52
+    - /fragment@52/__overlay__
+    - /fragment@53
+    - /fragment@53/__overlay__
+    - /fragment@54
+    - /fragment@54/__overlay__
+    - /fragment@55
+    - /fragment@55/__overlay__
+    - /fragment@56
+    - /fragment@56/__overlay__
+    - /fragment@57
+    - /fragment@57/__overlay__
+    - /fragment@58
+    - /fragment@58/__overlay__
+    - /fragment@59
+    - /fragment@59/__overlay__
+    - /fragment@6
+    - /fragment@6/__overlay__
+    - /fragment@6/__overlay__/eint0default
+    - /fragment@6/__overlay__/eint@0
+    - /fragment@6/__overlay__/eint@0/pins_cmd_dat
+    - /fragment@6/__overlay__/eintoutput0
+    - /fragment@6/__overlay__/eintoutput0/pins_cmd_dat
+    - /fragment@6/__overlay__/eintoutput1
+    - /fragment@6/__overlay__/eintoutput1/pins_cmd_dat
+    - /fragment@6/__overlay__/rstoutput0
+    - /fragment@6/__overlay__/rstoutput0/pins_cmd_dat
+    - /fragment@6/__overlay__/rstoutput1
+    - /fragment@6/__overlay__/rstoutput1/pins_cmd_dat
+    - /fragment@7
+    - /fragment@7/__overlay__
+    - /fragment@8
+    - /fragment@8/__overlay__
+    - /fragment@8/__overlay__/accdetdefault
+    - /fragment@8/__overlay__/accdeteint@0
+    - /fragment@8/__overlay__/accdeteint@0/pins_cmd_dat
+    - /fragment@9
+    - /fragment@9/__overlay__
+
+【2】仅在 Wi-Fi 版出现 (492):
+    + /accdet
+    + /aes_top0@10016000
+    + /amms_control
+    + /ap_ccif0@10209000
+    + /ap_ccif1@1020b000
+    + /ap_ccif2@1023c000
+    + /ap_ccif3@1023e000
+    + /ap_dma@11000000
+    + /apcldmain@1021b000
+    + /apcldmain_ao@10014000
+    + /apcldmamisc@1021b800
+    + /apcldmamisc_ao@10014800
+    + /apcldmamisc_ao@10014c00
+    + /apcldmaout@1021b400
+    + /apcldmaout_ao@10014400
+    + /apirq@1000b000
+    + /apmixed@1000c000
+    + /atf_logger
+    + /audio@11220000
+    + /audio_snd_card
+    + /audio_sram@11221000
+    + /auxadc@11001000
+    + /battery
+    + /bpi_bsi_slv0@1021e000
+    + /bpi_bsi_slv1@1021f000
+    + /bpi_bsi_slv2@10225000
+    + /btcvsd@10001000
+    + /btif@1100c000
+    + /bus_dbg@10208000
+    + /cam@15004000
+    + /cam_dma@15007000
+    + /cam_inner@1500d000
+    + /cam_inner_dma@1500f000
+    + /cam_lut@15005000
+    + /camd@15006000
+    + /camd_inner@1500e000
+    + /camsv0@15050000
+    + /camsv1@15051000
+    + /camsys@15000000
+    + /charger
+    + /chipid@08000000
+    + /chosen
+    + /clocks
+    + /clocks/clk26m
+    + /clocks/clk32k
+    + /consys@18002000
+    + /cpu_dbgapb@0d410000
+    + /cpus
+    + /cpus/cpu-map
+    + /cpus/cpu-map/cluster0
+    + /cpus/cpu-map/cluster0/core0
+    + /cpus/cpu-map/cluster0/core1
+    + /cpus/cpu-map/cluster0/core2
+    + /cpus/cpu-map/cluster0/core3
+    + /cpus/cpu@000
+    + /cpus/cpu@001
+    + /cpus/cpu@002
+    + /cpus/cpu@003
+    + /cpus/idle-states
+    + /cpus/idle-states/dpidle
+    + /cpus/idle-states/mcdi-cluster
+    + /cpus/idle-states/mcdi-cpu
+    + /cpus/idle-states/sodi
+    + /cpus/idle-states/sodi3
+    + /cpus/idle-states/standby
+    + /cpus/idle-states/suspend
+    + /cq_dma@10212000
+    + /dbg_apmcu_mp0@0d400000
+    + /dbg_apmcu_mp0@0d410000
+    + /dbg_apmcu_mp0@0d420000
+    + /dbg_apmcu_mp0@0d430000
+    + /dbg_apmcu_mp0@0d440000
+    + /dbg_apmcu_mp0@0d510000
+    + /dbg_apmcu_mp0@0d520000
+    + /dbg_apmcu_mp0@0d530000
+    + /dbg_apmcu_mp0@0d540000
+    + /dbg_apmcu_mp0@0d610000
+    + /dbg_apmcu_mp0@0d620000
+    + /dbg_apmcu_mp0@0d630000
+    + /dbg_apmcu_mp0@0d640000
+    + /dbg_apmcu_mp0@0d710000
+    + /dbg_apmcu_mp0@0d720000
+    + /dbg_apmcu_mp0@0d730000
+    + /dbg_apmcu_mp0@0d740000
+    + /dbg_apmcu_mp1@0d800000
+    + /dbg_apmcu_mp1@0d810000
+    + /dbg_apmcu_mp1@0d820000
+    + /dbg_apmcu_mp1@0d830000
+    + /dbg_apmcu_mp1@0d840000
+    + /dbg_apmcu_mp1@0d910000
+    + /dbg_apmcu_mp1@0d920000
+    + /dbg_apmcu_mp1@0d930000
+    + /dbg_apmcu_mp1@0d940000
+    + /dbg_apmcu_mp1@0da10000
+    + /dbg_apmcu_mp1@0da20000
+    + /dbg_apmcu_mp1@0da30000
+    + /dbg_apmcu_mp1@0da40000
+    + /dbg_apmcu_mp1@0db10000
+    + /dbg_apmcu_mp1@0db20000
+    + /dbg_apmcu_mp1@0db30000
+    + /dbg_apmcu_mp1@0db40000
+    + /dbg_cti@0d020000
+    + /dbg_dem@0d0a0000
+    + /dbg_etr@0d030000
+    + /dbg_funnel@0d040000
+    + /dbg_mdsys1@0d0c0000
+    + /devapc@10207000
+    + /dfd@10200b00
+    + /disp_aal0@14011000
+    + /disp_ccorr0@14010000
+    + /disp_color0@1400f000
+    + /disp_dither0@14013000
+    + /disp_gamma0@14012000
+    + /disp_mutex0@14001000
+    + /disp_ovl0@1400b000
+    + /disp_ovl0_2l@1400c000
+    + /disp_pwm@1100e000
+    + /disp_rdma0@1400d000
+    + /disp_rsz0@14015000
+    + /disp_wdma0@1400e000
+    + /dispsys
+    + /dma-controller@11000580
+    + /dramc@1022a000
+    + /dsi0@14014000
+    + /dsi_te
+    + /dvfsp@00110800
+    + /dvfsp@10227000
+    + /dvfsrc@10012000
+    + /dxcc_sec@10210000
+    + /dynamic_options
+    + /eem_fsm@1100b000
+    + /efuse_dbg@10004000
+    + /efusec@11c50000
+    + /emi@10219000
+    + /fdvt@1500b000
+    + /fhctl@1000ce00
+    + /firmware
+    + /firmware/android
+    + /firmware/android/fstab
+    + /firmware/android/fstab/vendor
+    + /firmware/android/vbmeta
+    + /flashlight_core
+    + /flashlights_mt6370
+    + /flashlights_mt6370/channel@1
+    + /flashlights_mt6370/channel@2
+    + /gauge_timer
+    + /gce@10238000
+    + /gce_mbox@10238000
+    + /gic500@0c000000
+    + /gic_cpu@0c400000
+    + /gpio
+    + /gpio-keys
+    + /gpio-keys/button@0
+    + /gpio-keys/button@1
+    + /gpio-keys/button@2
+    + /gpio@10005000
+    + /gpufreq
+    + /hacc@1000a000
+    + /i2c0@11007000
+    + /i2c1@11008000
+    + /i2c2@11009000
+    + /i2c3@1100f000
+    + /i2c4@11011000
+    + /i2c5@11016000
+    + /i2c6@1100d000
+    + /i2c7
+    + /i2c8
+    + /i2c9
+    + /i2c_common
+    + /imp_iic@11017000
+    + /infra_mbist@1020d000
+    + /infracfg@1020e000
+    + /infracfg_ao@10001000
+    + /interrupt-controller@0c000000
+    + /intpol-controller@10200a80
+    + /io_cfg_bl@10002600
+    + /io_cfg_lb@10002400
+    + /io_cfg_lm@10002200
+    + /io_cfg_lt@10002000
+    + /io_cfg_rb@10002a00
+    + /io_cfg_rr@10002800
+    + /io_cfg_rt@10002c00
+    + /iocfg_0@10002000
+    + /iocfg_1@10002200
+    + /iocfg_2@10002400
+    + /iocfg_3@10002600
+    + /iocfg_4@10002800
+    + /iocfg_5@10002a00
+    + /irq_nfc
+    + /ispsys@15000000
+    + /kd_camera_hw1@15040000
+    + /kp@10010000
+    + /l2c_parity
+    + /lk_charger
+    + /m4u@10205000
+    + /mbist@17050000
+    + /mbist_ao@10013000
+    + /mcdi@0010fc00
+    + /mcucfg@10200000
+    + /mcucfg@10200200
+    + /mcucfg@10200400
+    + /mcucfg@10200600
+    + /mcucfg@10200800
+    + /mcucfg@10200a00
+    + /mcucfg@10200f00
+    + /mcucfg@10201000
+    + /mcucfg@10202000
+    + /mcucfg@10203000
+    + /mcucfg_mp0_counter@10200000
+    + /mcupm_reg@10216000
+    + /mcupm_sram0@10217000
+    + /mcupm_sram1@10218000
+    + /mcupm_sram2@10211000
+    + /mcupm_sram3@10213000
+    + /md1_sim1_hot_plug_eint
+    + /md1_sim2_hot_plug_eint
+    + /md_ccif0@1020a000
+    + /md_ccif1@1020c000
+    + /md_ccif2@1023d000
+    + /md_ccif3@1023f000
+    + /mdcldma@10014000
+    + /mdcldmain@1021c000
+    + /mdcldmain_ao@10015000
+    + /mdcldmamisc@1021c800
+    + /mdcldmamisc_ao@10015800
+    + /mdcldmaout@1021c400
+    + /mdcldmaout_ao@10015400
+    + /mdp_ccorr0@14005000
+    + /mdp_rdma0@14004000
+    + /mdp_rsz0@14006000
+    + /mdp_rsz1@14007000
+    + /mdp_tdshp0@1400a000
+    + /mdp_wdma0@14008000
+    + /mdp_wrot0@14009000
+    + /memory
+    + /mfg_cfg@13ffe000
+    + /mfg_clark@13000000
+    + /mipi_rx_ana_csi0a@11c10000
+    + /mipi_rx_ana_csi0b@11c11000
+    + /mipi_rx_ana_csi1@11c20000
+    + /mipi_rx_ana_csi1a@11c12000
+    + /mipi_rx_ana_csi1b@11c13000
+    + /mipi_rx_ana_csi2@11c30000
+    + /mipi_rx_ana_csi2a@11c14000
+    + /mipi_rx_ana_csi2b@11c15000
+    + /mipi_tx0@11c80000
+    + /mm_mutex@14016000
+    + /mmdvfs_pmqos
+    + /mmsys_config@14000000
+    + /mobicore
+    + /modem_temp_share@10018000
+    + /mrdump_ext_rst
+    + /msdc0_pad_macro@11cd0000
+    + /msdc0_top@11cd0000
+    + /msdc1_ins@0
+    + /msdc1_pad_macro@11c90000
+    + /msdc1_top@11c90000
+    + /msdc@11230000
+    + /msdc@11240000
+    + /msdc@11250000
+    + /msdc@11260000
+    + /mt-pmic
+    + /mt-pmic/buck_regulators
+    + /mt-pmic/buck_regulators/buck_vcore
+    + /mt-pmic/buck_regulators/buck_vmodem
+    + /mt-pmic/buck_regulators/buck_vpa
+    + /mt-pmic/buck_regulators/buck_vproc
+    + /mt-pmic/buck_regulators/buck_vs1
+    + /mt-pmic/ldo_regulators
+    + /mt-pmic/ldo_regulators/aw87329_pa@
+    + /mt-pmic/ldo_regulators/ldo_vaud28
+    + /mt-pmic/ldo_regulators/ldo_vaux18
+    + /mt-pmic/ldo_regulators/ldo_vcama
+    + /mt-pmic/ldo_regulators/ldo_vcamd
+    + /mt-pmic/ldo_regulators/ldo_vcamio
+    + /mt-pmic/ldo_regulators/ldo_vcn18
+    + /mt-pmic/ldo_regulators/ldo_vcn28
+    + /mt-pmic/ldo_regulators/ldo_vcn33_bt
+    + /mt-pmic/ldo_regulators/ldo_vcn33_wifi
+    + /mt-pmic/ldo_regulators/ldo_vdram
+    + /mt-pmic/ldo_regulators/ldo_vefuse
+    + /mt-pmic/ldo_regulators/ldo_vemc
+    + /mt-pmic/ldo_regulators/ldo_vfe28
+    + /mt-pmic/ldo_regulators/ldo_vibr
+    + /mt-pmic/ldo_regulators/ldo_vio18
+    + /mt-pmic/ldo_regulators/ldo_vio28
+    + /mt-pmic/ldo_regulators/ldo_vldo28
+    + /mt-pmic/ldo_regulators/ldo_vmc
+    + /mt-pmic/ldo_regulators/ldo_vmch
+    + /mt-pmic/ldo_regulators/ldo_vrf12
+    + /mt-pmic/ldo_regulators/ldo_vrf18
+    + /mt-pmic/ldo_regulators/ldo_vsim1
+    + /mt-pmic/ldo_regulators/ldo_vsim2
+    + /mt-pmic/ldo_regulators/ldo_vsram_others
+    + /mt-pmic/ldo_regulators/ldo_vsram_proc
+    + /mt-pmic/ldo_regulators/ldo_vusb33
+    + /mt-pmic/ldo_regulators/ldo_vxo22
+    + /mt-pmic/mt635x-auxadc
+    + /mt-pmic/mt635x-auxadc/accdet
+    + /mt-pmic/mt635x-auxadc/bat_temp
+    + /mt-pmic/mt635x-auxadc/batadc
+    + /mt-pmic/mt635x-auxadc/chip_temp
+    + /mt-pmic/mt635x-auxadc/dcxo_temp
+    + /mt-pmic/mt635x-auxadc/hpofs_cal
+    + /mt-pmic/mt635x-auxadc/isense
+    + /mt-pmic/mt635x-auxadc/tsx_temp
+    + /mt-pmic/mt635x-auxadc/vbif
+    + /mt-pmic/mt635x-auxadc/vcdt
+    + /mt-pmic/mt635x-auxadc/vcore_temp
+    + /mt-pmic/mt635x-auxadc/vproc_temp
+    + /mt6357_gauge
+    + /mt6370_pmu_dts
+    + /mt6370_pmu_dts/bled
+    + /mt6370_pmu_dts/charger
+    + /mt6370_pmu_dts/core
+    + /mt6370_pmu_dts/dsv
+    + /mt6370_pmu_dts/dsv/mt6370_dsvn
+    + /mt6370_pmu_dts/dsv/mt6370_dsvp
+    + /mt6370_pmu_dts/ldo
+    + /mt6370_pmu_dts/ldo/mt6370_ldo
+    + /mt6370_pmu_dts/mt6370_pmu_fled1
+    + /mt6370_pmu_dts/mt6370_pmu_fled2
+    + /mt6370_pmu_dts/rgbled
+    + /mt6370_pmu_eint
+    + /mt_charger
+    + /mt_soc_anc_pcm
+    + /mt_soc_btcvsd_rx_pcm
+    + /mt_soc_btcvsd_tx_pcm
+    + /mt_soc_codec_dummy_name
+    + /mt_soc_codec_name
+    + /mt_soc_dai_name
+    + /mt_soc_deep_buffer_dl_pcm
+    + /mt_soc_dl1_awb_pcm
+    + /mt_soc_dl1_pcm@11220000
+    + /mt_soc_dl2_pcm
+    + /mt_soc_dummy_pcm
+    + /mt_soc_fm_i2s_awb_pcm
+    + /mt_soc_fm_i2s_pcm
+    + /mt_soc_fm_mrgtx_pcm
+    + /mt_soc_hp_impedance_pcm
+    + /mt_soc_i2s0_awb_pcm
+    + /mt_soc_i2s0_pcm
+    + /mt_soc_i2s0dl1_pcm
+    + /mt_soc_mrgrx_awb_pcm
+    + /mt_soc_mrgrx_pcm
+    + /mt_soc_pcm_voice_ultra
+    + /mt_soc_pcm_voice_usb
+    + /mt_soc_pcm_voice_usb_echoref
+    + /mt_soc_routing_dai_name
+    + /mt_soc_routing_pcm
+    + /mt_soc_tdmrx_pcm
+    + /mt_soc_ul1_pcm
+    + /mt_soc_ul2_pcm
+    + /mt_soc_uldlloopback_pcm
+    + /mt_soc_voice_md1
+    + /mt_soc_voice_md1_bt
+    + /mt_soc_voice_md2
+    + /mt_soc_voice_md2_bt
+    + /mt_soc_voip_bt_in
+    + /mt_soc_voip_bt_out
+    + /mtkfb@0
+    + /nfc
+    + /nfi@11018000
+    + /nfiecc@11019000
+    + /odm
+    + /otg_iddig
+    + /pericfg@10003000
+    + /pinctrl@1000b000
+    + /pinctrl@1000b000/eint60default
+    + /pinctrl@1000b000/eint60default/pins_cmd_dat
+    + /pinctrl@1000b000/msdc0@default
+    + /pinctrl@1000b000/msdc0@default/pins_clk
+    + /pinctrl@1000b000/msdc0@default/pins_cmd
+    + /pinctrl@1000b000/msdc0@default/pins_dat
+    + /pinctrl@1000b000/msdc0@default/pins_ds
+    + /pinctrl@1000b000/msdc0@default/pins_rst
+    + /pinctrl@1000b000/msdc0@hs200
+    + /pinctrl@1000b000/msdc0@hs200/pins_clk
+    + /pinctrl@1000b000/msdc0@hs200/pins_cmd
+    + /pinctrl@1000b000/msdc0@hs200/pins_dat
+    + /pinctrl@1000b000/msdc0@hs200/pins_ds
+    + /pinctrl@1000b000/msdc0@hs200/pins_rst
+    + /pinctrl@1000b000/msdc0@hs400
+    + /pinctrl@1000b000/msdc0@hs400/pins_clk
+    + /pinctrl@1000b000/msdc0@hs400/pins_cmd
+    + /pinctrl@1000b000/msdc0@hs400/pins_dat
+    + /pinctrl@1000b000/msdc0@hs400/pins_ds
+    + /pinctrl@1000b000/msdc0@hs400/pins_rst
+    + /pinctrl@1000b000/msdc0@register_default
+    + /pinctrl@1000b000/msdc1@ddr50
+    + /pinctrl@1000b000/msdc1@ddr50/pins_clk
+    + /pinctrl@1000b000/msdc1@ddr50/pins_cmd
+    + /pinctrl@1000b000/msdc1@ddr50/pins_dat
+    + /pinctrl@1000b000/msdc1@default
+    + /pinctrl@1000b000/msdc1@default/pins_clk
+    + /pinctrl@1000b000/msdc1@default/pins_cmd
+    + /pinctrl@1000b000/msdc1@default/pins_dat
+    + /pinctrl@1000b000/msdc1@register_default
+    + /pinctrl@1000b000/msdc1@sdr104
+    + /pinctrl@1000b000/msdc1@sdr104/pins_clk
+    + /pinctrl@1000b000/msdc1@sdr104/pins_cmd
+    + /pinctrl@1000b000/msdc1@sdr104/pins_dat
+    + /pinctrl@1000b000/msdc1@sdr50
+    + /pinctrl@1000b000/msdc1@sdr50/pins_clk
+    + /pinctrl@1000b000/msdc1@sdr50/pins_cmd
+    + /pinctrl@1000b000/msdc1@sdr50/pins_dat
+    + /pinctrl@1000b000/msdc3@default
+    + /pinctrl@1000b000/msdc3@default/pins_clk
+    + /pinctrl@1000b000/msdc3@default/pins_cmd
+    + /pinctrl@1000b000/msdc3@default/pins_dat
+    + /pinctrl@1000b000/msdc3@register_default
+    + /pmic_clock_buffer_ctrl
+    + /pmu
+    + /psci
+    + /pseudo_m4u
+    + /pseudo_m4u-larb0
+    + /pseudo_m4u-larb1
+    + /pseudo_m4u-larb2
+    + /pwm@11006000
+    + /pwrap@1000d000
+    + /radio_md_cfg
+    + /reserved-memory
+    + /reserved-memory/consys-reserve-memory
+    + /reserved-memory/minirdump-reserved-memory@47d70000
+    + /reserved-memory/pstore-reserved-memory@47c90000
+    + /reserved-memory/ram_console-reserved-memory@47c80000
+    + /reserved-memory/reserve-memory-scp_share
+    + /reserved-memory/reserve-memory-sspm_share
+    + /reserved-memory/wifi-reserve-memory
+    + /rt-pd-manager
+    + /rt9465_slave_chr
+    + /scp@10500000
+    + /scp_dvfs
+    + /scpsys@10001000
+    + /security_ao@1001a000
+    + /serial@11020000
+    + /serial@11030000
+    + /sleep@10006000
+    + /sleep_reg_md@1000f000
+    + /smart_pa
+    + /smi_common@14002000
+    + /smi_larb0@14003000
+    + /smi_larb1@17010000
+    + /smi_larb2@15001000
+    + /spi0@1100a000
+    + /spi1@11010000
+    + /spi2@11012000
+    + /spi3@11013000
+    + /spi4@11014000
+    + /spi5@11015000
+    + /sramrom@10214000
+    + /sspm@10440000
+    + /sys_cirq@10204000
+    + /sys_timer@10017000
+    + /syscfg_pctl_0@10005000
+    + /syscfg_pctl_1@10002000
+    + /syscfg_pctl_2@10002200
+    + /syscfg_pctl_3@10002400
+    + /syscfg_pctl_4@10002600
+    + /syscfg_pctl_5@10002800
+    + /syscfg_pctl_6@10002a00
+    + /syscfg_pctl_7@10002c00
+    + /tcpc_pd
+    + /therm_ctrl@1100b000
+    + /timer
+    + /timer@10008000
+    + /tkcore
+    + /topckgen@10000000
+    + /topckgen_ao@1001b000
+    + /topmisc@10011000
+    + /toprgu@10007000
+    + /touch
+    + /trng@1020f000
+    + /trusty
+    + /trusty/irq
+    + /trusty/log
+    + /trusty/mtee
+    + /trusty/virtio
+    + /type_c_port0
+    + /type_c_port0/dpm_caps
+    + /type_c_port0/pd-data
+    + /type_c_port0/pd-data/bat-info0
+    + /usb0@11200000
+    + /usb1p_sif@11210000
+    + /usb_sif@11210000
+    + /utos
+    + /utos_tester
+    + /vdec@17040000
+    + /venc@17020000
+    + /venc_gcon@17000000
+    + /venc_jpg@17030000
+    + /wifi@18000000
+
+【3】status 开关差异 (0):
+
+【4】compatible 差异 (1):
+    /
+        4G:   <none>
+        WiFi: "mediatek,MT6761"
+
+【5】reg(地址) 差异 (0):
+
+【6】其它属性差异 (252) (截断显示前80项):
+    / . #address-cells : 4G=<none>  WiFi=<0x2>
+    / . interrupt-parent : 4G=<none>  WiFi=<0x1>
+    / . #size-cells : 4G=<none>  WiFi=<0x2>
+    / . model : 4G=<none>  WiFi="MT6761"
+    /__symbols__ . mt_pmic_vrf18_ldo_reg : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/ldo_vrf18"
+    /__symbols__ . gpslna_pins_ol : 4G="/fragment@13/__overlay__/gpslna@2"  WiFi=<none>
+    /__symbols__ . gpslna_pins_init : 4G="/fragment@13/__overlay__/gpslna@0"  WiFi=<none>
+    /__symbols__ . syscfg_pctl_6 : 4G=<none>  WiFi="/syscfg_pctl_6@10002a00"
+    /__symbols__ . mt_pmic_vcamd_ldo_reg : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/ldo_vcamd"
+    /__symbols__ . mt_pmic_vmc_ldo_reg : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/ldo_vmc"
+    /__symbols__ . pwm : 4G=<none>  WiFi="/pwm@11006000"
+    /__symbols__ . accdet_pins_eint_as_int : 4G="/fragment@8/__overlay__/accdeteint@0"  WiFi=<none>
+    /__symbols__ . camera_main_af_mtk : 4G="/fragment@28/__overlay__/camera_main_af...  WiFi=<none>
+    /__symbols__ . disp_mutex0 : 4G=<none>  WiFi="/disp_mutex0@14001000"
+    /__symbols__ . mt_pmic_vio18_ldo_reg : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/ldo_vio18"
+    /__symbols__ . SODI : 4G=<none>  WiFi="/cpus/idle-states/sodi"
+    /__symbols__ . msdc3 : 4G=<none>  WiFi="/msdc@11260000"
+    /__symbols__ . mdp_wrot0 : 4G=<none>  WiFi="/mdp_wrot0@14009000"
+    /__symbols__ . i2c8 : 4G=<none>  WiFi="/i2c8"
+    /__symbols__ . mt_pmic_vsim1_ldo_reg : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/ldo_vsim1"
+    /__symbols__ . chosen : 4G=<none>  WiFi="/chosen"
+    /__symbols__ . mt_pmic_vdram_ldo_reg : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/ldo_vdram"
+    /__symbols__ . i2c6 : 4G=<none>  WiFi="/i2c6@1100d000"
+    /__symbols__ . msdc0_pins_hs200 : 4G=<none>  WiFi="/pinctrl@1000b000/msdc0@hs200"
+    /__symbols__ . mt_pmic_vcore_buck_reg : 4G=<none>  WiFi="/mt-pmic/buck_regulators/buck_vcore"
+    /__symbols__ . i2c2 : 4G=<none>  WiFi="/i2c2@11009000"
+    /__symbols__ . STANDBY : 4G=<none>  WiFi="/cpus/idle-states/standby"
+    /__symbols__ . mdp_rsz0 : 4G=<none>  WiFi="/mdp_rsz0@14006000"
+    /__symbols__ . camera_pins_cam0_rst0 : 4G="/fragment@20/__overlay__/cam0@0"  WiFi=<none>
+    /__symbols__ . nfc : 4G=<none>  WiFi="/nfc"
+    /__symbols__ . ctp_pins_rst_output0 : 4G="/fragment@6/__overlay__/rstoutput0"  WiFi=<none>
+    /__symbols__ . msdc0_pins_hs400 : 4G=<none>  WiFi="/pinctrl@1000b000/msdc0@hs400"
+    /__symbols__ . msdc2 : 4G=<none>  WiFi="/msdc@11250000"
+    /__symbols__ . mt_pmic_vaud28_ldo_reg : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/ldo_vaud28"
+    /__symbols__ . mipi_rx_ana_csi2a : 4G=<none>  WiFi="/mipi_rx_ana_csi2a@11c14000"
+    /__symbols__ . gce : 4G=<none>  WiFi="/gce@10238000"
+    /__symbols__ . msdc1_pins_ddr50 : 4G=<none>  WiFi="/pinctrl@1000b000/msdc1@ddr50"
+    /__symbols__ . ctp_pins_default : 4G="/fragment@6/__overlay__/eint0default"  WiFi=<none>
+    /__symbols__ . camera_main_mtk : 4G="/fragment@28/__overlay__/camera_main@1a...  WiFi=<none>
+    /__symbols__ . speaker_amp_mtk : 4G="/fragment@29/__overlay__/speaker_amp@34...  WiFi=<none>
+    /__symbols__ . gse_1 : 4G="/fragment@1/__overlay__/gse_1"  WiFi=<none>
+    /__symbols__ . mdcldma : 4G=<none>  WiFi="/mdcldma@10014000"
+    /__symbols__ . camera_pins_cam1_rst0 : 4G="/fragment@20/__overlay__/cam1@0"  WiFi=<none>
+    /__symbols__ . syscfg_pctl_5 : 4G=<none>  WiFi="/syscfg_pctl_5@10002800"
+    /__symbols__ . mm_mutex : 4G=<none>  WiFi="/mm_mutex@14016000"
+    /__symbols__ . camera_pins_cam2_mclk_off : 4G="/fragment@20/__overlay__/camera_pins_ca...  WiFi=<none>
+    /__symbols__ . accdet : 4G=<none>  WiFi="/accdet"
+    /__symbols__ . msdc0 : 4G=<none>  WiFi="/msdc@11230000"
+    /__symbols__ . audio : 4G=<none>  WiFi="/audio@11220000"
+    /__symbols__ . mdp_rdma0 : 4G=<none>  WiFi="/mdp_rdma0@14004000"
+    /__symbols__ . aud_dat_mosi_off : 4G="/fragment@16/__overlay__/aud_dat_mosi_o...  WiFi=<none>
+    /__symbols__ . mt_pmic_vcama_ldo_reg : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/ldo_vcama"
+    /__symbols__ . aud_clk_mosi_on : 4G="/fragment@16/__overlay__/aud_clk_mosi_o...  WiFi=<none>
+    /__symbols__ . sysirq : 4G=<none>  WiFi="/intpol-controller@10200a80"
+    /__symbols__ . keypad : 4G=<none>  WiFi="/kp@10010000"
+    /__symbols__ . touch : 4G=<none>  WiFi="/touch"
+    /__symbols__ . msdc0_register_setting_default : 4G=<none>  WiFi="/pinctrl@1000b000/msdc0@register_defaul...
+    /__symbols__ . mt_charger : 4G=<none>  WiFi="/mt_charger"
+    /__symbols__ . camera_pins_cam_ldo_rear2_vcama_0 : 4G="/fragment@20/__overlay__/cam2@vcama0"  WiFi=<none>
+    /__symbols__ . mt_pmic_vcn28_ldo_reg : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/ldo_vcn28"
+    /__symbols__ . radio_md_cfg : 4G=<none>  WiFi="/radio_md_cfg"
+    /__symbols__ . mt_pmic_vcamio_ldo_reg : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/ldo_vcamio"
+    /__symbols__ . led4 : 4G="/fragment@1/__overlay__/led@4"  WiFi=<none>
+    /__symbols__ . consys_pins_default : 4G="/fragment@13/__overlay__/consys_default...  WiFi=<none>
+    /__symbols__ . otg_iddig : 4G=<none>  WiFi="/otg_iddig"
+    /__symbols__ . mdp_rsz1 : 4G=<none>  WiFi="/mdp_rsz1@14007000"
+    /__symbols__ . aud_pins_smartpa_off : 4G="/fragment@16/__overlay__/aud_pins_smart...  WiFi=<none>
+    /__symbols__ . gpio : 4G=<none>  WiFi="/gpio@10005000"
+    /__symbols__ . apmixed : 4G=<none>  WiFi="/apmixed@1000c000"
+    /__symbols__ . camera_pins_cam0_mclk_off : 4G="/fragment@20/__overlay__/camera_pins_ca...  WiFi=<none>
+    /__symbols__ . i2c3 : 4G=<none>  WiFi="/i2c3@1100f000"
+    /__symbols__ . mt_pmic_vaux18_ldo_reg : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/ldo_vaux18"
+    /__symbols__ . gsensor_mtk : 4G="/fragment@27/__overlay__/gsensor@19"  WiFi=<none>
+    /__symbols__ . function_key : 4G=<none>  WiFi="/pinctrl@1000b000/eint60default"
+    /__symbols__ . scpsys : 4G=<none>  WiFi="/scpsys@10001000"
+    /__symbols__ . mipi_rx_ana_csi0a : 4G=<none>  WiFi="/mipi_rx_ana_csi0a@11c10000"
+    /__symbols__ . venc_gcon : 4G=<none>  WiFi="/venc_gcon@17000000"
+    /__symbols__ . dynamic_options : 4G=<none>  WiFi="/dynamic_options"
+    /__symbols__ . aw87329_pa : 4G=<none>  WiFi="/mt-pmic/ldo_regulators/aw87329_pa@"
+    /__symbols__ . camera_pins_cam_ldo_rear2_vcama_1 : 4G="/fragment@20/__overlay__/cam2@vcama1"  WiFi=<none>
+    ... (其余 172 项略)

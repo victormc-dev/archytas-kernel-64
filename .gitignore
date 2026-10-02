@@ -1,0 +1,19 @@
+# 本仓库只跟踪 port/ 下的移植成果。
+# 以下为排除项（体积庞大或涉固件版权/分发限制，不纳入版本控制）：
+
+# archimedes 4G 版 64 位内核源码树（5.6 万+ 文件，第三方项目）
+archimedes-kernel-64-main/
+
+# 原厂 ROM 固件镜像（bin 文件，版权/分发受限）
+柴提全原无数据4G_9.1864/
+柴提全原无数据WiFi.9.1638/
+
+# 工作区元数据
+.workbuddy/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# macOS 系统文件
+.DS_Store

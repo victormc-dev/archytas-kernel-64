@@ -1,0 +1,29 @@
+======================================================================
+DTB 全量对比:  4G模板(4g_oem_dtbo.dtb)  vs  Wi-Fi版(dtbo_internal.dtb)
+======================================================================
+4G 节点数: 288 | Wi-Fi 节点数: 288 | 共同: 288
+
+【1】仅在 4G 模板出现 (0):
+
+【2】仅在 Wi-Fi 版出现 (0):
+
+【3】status 开关差异 (0):
+
+【4】compatible 差异 (0):
+
+【5】reg(地址) 差异 (0):
+
+【6】其它属性差异 (13) (截断显示前80项):
+    /__fixups__ . pio : 4G=[ 2f 66 72 61 67 6d 65 6e 74 40 31 2f 5f...  WiFi=<0x2f667261 0x676d656e 0x7440312f 0x5f5f...
+    /fragment@36/__overlay__ . GPIO_SIM1_SRST : 4G=<0xffffffff 0x27 0x0>  WiFi=<none>
+    /fragment@36/__overlay__ . GPIO_SIM2_SCLK : 4G=<0xffffffff 0x25 0x0>  WiFi=<none>
+    /fragment@36/__overlay__ . GPIO_SIM1_SIO : 4G=<0xffffffff 0x28 0x0>  WiFi=<none>
+    /fragment@36/__overlay__ . GPIO_SIM2_SIO : 4G=<0xffffffff 0x23 0x0>  WiFi=<none>
+    /fragment@36/__overlay__ . GPIO_SIM2_SRST : 4G=<0xffffffff 0x24 0x0>  WiFi=<none>
+    /fragment@36/__overlay__ . GPIO_SIM1_SCLK : 4G=<0xffffffff 0x26 0x0>  WiFi=<none>
+    /fragment@37/__overlay__ . gpio_init_default : 4G=<0x0 0x0 0x0 0x0 0x1 0x1 0x1 0x1 0x0 0x0...  WiFi=<0x0 0x0 0x0 0x0 0x1 0x1 0x1 0x1 0x0 0x0...
+    /fragment@39/__overlay__ . deb-gpios : 4G=<0xffffffff 0x1 0x0>  WiFi=<none>
+    /fragment@39/__overlay__ . debounce : 4G=<0x3e8>  WiFi=<none>
+    /fragment@39/__overlay__ . interrupts : 4G=<0x1 0x4 0x1 0x0>  WiFi=<0x1 0x2 0x1 0x0>
+    /fragment@49/__overlay__ . debounce : 4G=<0x0 0x186a0>  WiFi=<0x0 0x2710>
+    /fragment@49/__overlay__ . interrupts : 4G=<0x0 0x8>  WiFi=<0x0 0x4>
