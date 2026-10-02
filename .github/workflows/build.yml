@@ -1,0 +1,99 @@
+name: Build Archytas (Wi-Fi) 64-bit Kernel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+
+# Allow the workflow to upload artifacts.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout this repo (port/ scripts + defconfig + Wi-Fi DTB)
+        uses: actions/checkout@v4
+
+      - name: Checkout 4G 64-bit kernel source (agui4541/archimedes-kernel-64)
+        uses: actions/checkout@v4
+        with:
+          repository: agui4541/archimedes-kernel-64
+          ref: main
+          path: kernel
+          fetch-depth: 1
+
+      - name: Install cross toolchain and build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu build-essential bc flex bison \
+            libssl-dev python3 git ca-certificates
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: Copy Archytas (Wi-Fi) defconfig into kernel tree
+        run: |
+          cp port/k61v1_64_archytas_defconfig \
+             kernel/arch/arm64/configs/k61v1_64_archytas_defconfig
+          ls -l kernel/arch/arm64/configs/k61v1_64_archytas_defconfig
+
+      - name: Build kernel (pure variant, Image.gz-dtb)
+        working-directory: kernel
+        env:
+          JOBS: "4"
+          CROSS_COMPILE: aarch64-linux-gnu-
+          # Keep compiler warnings non-fatal for the old 4.9 tree under a modern GCC.
+          KCFLAGS: "-Wno-error"
+        run: |
+          # Replicate build_archimedes.sh's proven steps but with the Archytas defconfig
+          # (that script hardcodes the 4G 'archimedes' defconfig name, so we call make directly):
+          # defconfig -> disable KernelSU -> olddefconfig -> Image.gz-dtb
+          OUT="$PWD/out-archytas"
+          mkdir -p "$OUT/include"
+          ln -sfn "$PWD/include/dt-bindings" "$OUT/include/dt-bindings"
+          make -C "$PWD" O="$OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+               HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon \
+               k61v1_64_archytas_defconfig
+          "$OUT/scripts/config" --file "$OUT/.config" --disable CONFIG_KSU
+          make -C "$PWD" O="$OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+               HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon olddefconfig
+          make -C "$PWD" O="$OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+               HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon KCFLAGS="-Wno-error" \
+               -j"$JOBS" Image.gz-dtb
+          ls -l "$OUT/arch/arm64/boot/Image.gz-dtb"
+
+      - name: Package Stage 1 (4G template DTB, fastest to verify same-PCB boot)
+        run: |
+          python3 kernel/package_archimedes_boot.py \
+            --template kernel/tools/archimedes-boot-template-32MiB.img \
+            --kernel   kernel/out-archytas/arch/arm64/boot/Image.gz-dtb \
+            --output  boot-archytas-wifi-stage1.img
+          python3 port/make_wifi_template.py \
+            --template kernel/tools/archimedes-boot-template-32MiB.img \
+            --wifi-dtb port/wifi_stock.dtb \
+            --output  wifi-template-32MiB.img
+
+      - name: Package Stage 2 (Wi-Fi DTB swapped in, proper port)
+        run: |
+          python3 kernel/package_archimedes_boot.py \
+            --template wifi-template-32MiB.img \
+            --kernel   kernel/out-archytas/arch/arm64/boot/Image.gz-dtb \
+            --output  boot-archytas-wifi.img
+
+      - name: Upload boot images
+        uses: actions/upload-artifact@v4
+        with:
+          name: archytas-wifi-boot
+          path: |
+            boot-archytas-wifi-stage1.img
+            boot-archytas-wifi.img
+          if-no-files-found: error
+
+# Flashing notes (not done by CI):
+#   - Flash boot-archytas-wifi.img (or stage1) to the boot partition with MTKClient.
+#   - dtbo partition MUST use the Wi-Fi OEM dtbo.bin (do NOT use the 4G one).
+#   - Disable AVB: mtk w vbmeta --disable-verification
+#   - See port/ARCHYTAS_PORT.md and port/flash_archytas.sh for the full runbook.
