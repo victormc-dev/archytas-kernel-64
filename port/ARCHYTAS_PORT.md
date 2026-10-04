@@ -926,6 +926,44 @@ if (u4Status != WLAN_STATUS_SUCCESS) {
    （`/vendor` 内仍是 32 位原厂模块）。目前故意不覆盖以免开机循环，但它可能会打断该 rc 里
    后续的上电动作 —— 值得对照 `init.wlan_drv.rc` 逐条确认。
 
+### 9.10 CI 触发过滤：不该编的推送就别编（2026-10-04）
+
+本日 `e6e309186` 只改了自检脚本，却照样跑了 **11 分钟全量构建**（run 37196634842，success）。
+`build.yml` 的 `push` 触发器现在带 `paths-ignore`：
+
+```yaml
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+      - 'port/verify_build_script.py'
+      - 'port/ci_*.py'
+      - 'port/dtb_*.py'
+      - 'port/analyze_oem_diff.py'
+      - 'port/check_ramdisk.py'
+      - 'port/dump_relocs.py'
+      - 'port/ext4_read.py'
+```
+
+**名单是"从反面"建出来的：只放构建链零引用的文件。** 在 `build.yml` +
+`build_connectivity_modules.sh` 里 grep 每个候选，构建真正读的 `port/` 文件只有：
+
+`patch_adrp_reloc.py`、`patch_wifi_dtb.py`、`make_wifi_template.py`、`elf_symbols.py`、
+`elf_debug_share.py`、`build_connectivity_modules.sh`、`k61v1_64_archytas_defconfig`、
+`wifi_stock.dtb`、`4g_stock.dtb`
+
+⇒ 这些**永远不能**出现在上面那张表里。特别提醒：`elf_debug_share.py` 和 `elf_symbols.py`
+看名字像分析工具，其实**是构建依赖**（`build_connectivity_modules.sh` 会调用），
+差点被误加。`flash_archytas.sh` 虽然 CI 不跑，也**保留不忽略**（保守起见）。
+
+`verify_build_script.py` **第 12 组**把这个契约双向锁住（共 **91 项 PASS**）：
+过滤器存在且只挂在 `push`；**没有任何构建输入被匹配**（用 `fnmatch`，并模拟 GitHub
+"`**/` 可匹配零级目录"的语义）；文档/自检/CI 辅助/分析工具**确实**被匹配。
+之所以要双向断言：静默忽略一个构建输入会留下一张**看似绿的过期镜像**，这是唯一真正危险的失败模式。
+
+`workflow_dispatch`（快车道）与 `pull_request` **故意不过滤** —— 快车道要能手动随时跑，
+PR 应当始终被验证。
+
 ---
 
 *生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*
