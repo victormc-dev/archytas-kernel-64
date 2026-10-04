@@ -56,6 +56,17 @@ jobs:
              kernel/arch/arm64/configs/k61v1_64_archytas_defconfig
           ls -l kernel/arch/arm64/configs/k61v1_64_archytas_defconfig
 
+      # MUST come before the kernel build. The patch edits
+      # arch/arm64/kernel/module.c, which is compiled INTO the kernel, so applying
+      # it after Image.gz-dtb (as an earlier revision did, from inside the module
+      # script) produces a boot image whose loader still refuses ADRP relocations
+      # -- the connectivity .ko files would keep failing with
+      # "unsupported RELA relocation: 275" / -ENOEXEC. Idempotent either way.
+      - name: Patch kernel so the module loader handles ADRP relocations
+        run: |
+          python3 port/patch_adrp_reloc.py "$GITHUB_WORKSPACE/kernel"
+          grep -n "ARCHYTAS_ADRP_RELOC" kernel/arch/arm64/kernel/module.c
+
       # NOTE on the fast lane (modules_only=true): port/build_connectivity_modules.sh
       # does not build the kernel at all -- it only compiles the four out-of-tree
       # .ko files. The slow part of this workflow has always been Image.gz-dtb above

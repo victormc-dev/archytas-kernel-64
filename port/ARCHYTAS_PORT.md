@@ -237,6 +237,11 @@ mtk reset
   `--fix-cortex-a53-843419` 从 `LDFLAGS_vmlinux` 拿掉，等于**连内核自身的 erratum 规避都放弃**
   （Cortex-A53 真实硬件缺陷：load/store 可能访问错误地址）。手术式补丁保留内核侧规避，只放宽模块加载策略。
 - 打补丁后 `grep ARCHYTAS_ADRP_RELOC arch/arm64/kernel/module.c` 必须命中；脚本以此作为**硬门禁**。
+- **补丁实现独立成 `port/patch_adrp_reloc.py`（幂等），且必须在编译内核之前执行**：
+  `module.c` 是**编进内核本体**的，若在内核编完之后才打补丁（早期版本就是把它放在模块步骤里），
+  artifact 里的 boot 镜像仍是不带补丁的 loader，`.ko` 照样 `insmod` 失败 —— 而且**构建是全绿的，属于静默错误**。
+  workflow 第 4 步（`Patch kernel so the module loader handles ADRP relocations`）排在 `Build kernel` 之前；
+  模块脚本里的那次调用只是「只编模块」模式与源码一致性的兜底。
 
 > ⚠️ **副作用**：改的是内核，所以**必须重新编译并重刷一次 boot 镜像**。此后迭代 `.ko` 用下面的快车道即可。
 
@@ -266,8 +271,16 @@ mtk reset
 
 ### 8.5 本地校验工具
 
-`port/verify_build_script.py`：`bash -n` + 逐个内嵌 python 脚本 AST 校验 + 用真实内核源码
-跑一遍 step 2e 补丁（含幂等性）+ 用真实 `.ko` 跑 `.modinfo` 提取器。改脚本后先跑它。
+- `port/verify_build_script.py`：改脚本后**先跑它**。含 6 组检查：`bash -n`；
+  **禁止无兜底的 `| head` 管道**（脚本是 `set -euo pipefail`，`find|head` 的 SIGPIPE 141 会被当成致命失败 ——
+  这正是 run #37186797793 在第一个模块后静默 exit 1 的原因）；逐个内嵌 python 的 AST 校验；
+  用真实内核源码跑 `patch_adrp_reloc.py`（含幂等 + 反向用例）；**校验 workflow 里补丁步骤排在内核构建之前**；
+  用真实 `.ko` 跑 `.modinfo` 提取器。
+- `port/ci_logs.py`：直接拉 GitHub Actions 日志（凭据取自 git credential manager，不打印）。
+  `--list` 列 run；默认取最近一个失败 run，打印失败步骤名 + 日志尾部 + 关键行命中。
+  **以后 CI 失败先跑它，不要靠猜。**
+- `port/dump_relocs.py <ko> [--targets]`：AArch64 重定位统计；`--targets` 按 `st_shndx` 解析节符号
+  （判断 ADRP 指向哪一节，是定位本问题的关键）。
 
 ---
 

@@ -355,47 +355,22 @@ done
 #
 # NOTE: this changes the KERNEL, so the boot image must be rebuilt and reflashed
 # once; after that, --modules-only runs only need the .ko files.
+#
+# ORDERING MATTERS: the patch has to be in place before `make Image.gz-dtb` runs,
+# otherwise the boot image in the artifact still carries the unpatched loader.
+# build.yml therefore applies it in its own step before the kernel build; the
+# call below is the idempotent safety net for --modules-only runs (where no
+# kernel is built at all) and keeps the source-consistency gate below meaningful.
 echo ">> allow ADRP relocations in arch/arm64/kernel/module.c"
 MODULE_C="$KROOT/arch/arm64/kernel/module.c"
-if [ ! -f "$MODULE_C" ]; then
-  echo "ERROR: $MODULE_C not found; cannot apply the ADRP relocation fix"
-  exit 1
-fi
-python3 - "$MODULE_C" <<'PY'
-import re, sys
-p = sys.argv[1]
-src = open(p, encoding="utf-8", errors="surrogateescape").read()
-if "ARCHYTAS_ADRP_RELOC" in src:
-    print("   already patched (marker present)")
-    sys.exit(0)
-# Match the guard exactly, tolerating indentation of the cases.
-old = re.compile(
-    r"[ \t]*#ifndef CONFIG_ARM64_ERRATUM_843419\n"
-    r"([ \t]*case R_AARCH64_ADR_PREL_PG_HI21_NC:\n"
-    r"[\s\S]*?break;\n)"
-    r"[ \t]*#endif\n")
-m = old.search(src)
-if not m:
-    sys.exit("ERROR: could not find the CONFIG_ARM64_ERRATUM_843419 ADRP guard "
-             "in %s -- the kernel source layout changed" % p)
-body = m.group(1)
-note = ("/* ARCHYTAS_ADRP_RELOC: the guard `#ifndef CONFIG_ARM64_ERRATUM_843419`\n"
-        " * used to compile these ADRP handlers out, which made every module that\n"
-        " * contains an ADRP relocation unloadable (`unsupported RELA relocation:\n"
-        " * 275`, -ENOEXEC).  These MTK connectivity modules DO contain them even\n"
-        " * though they are built with -mcmodel=large, so handle them normally.\n"
-        " * See port/build_connectivity_modules.sh step 2e. */\n")
-open(p, "w", encoding="utf-8", errors="surrogateescape").write(
-    src[:m.start()] + note + body + src[m.end():])
-n = body.count("case R_AARCH64_ADR_PREL_PG_HI21")
-print("   patched: %d ADRP case label(s) now compiled unconditionally" % n)
-PY
+python3 "$(dirname "${BASH_SOURCE[0]}")/patch_adrp_reloc.py" "$KROOT"
 if ! grep -q "ARCHYTAS_ADRP_RELOC" "$MODULE_C"; then
   echo "ERROR: ADRP relocation patch did not apply; modules with ADRP would be rejected"
   exit 1
 fi
 if grep -q '^#ifndef CONFIG_ARM64_ERRATUM_843419' "$MODULE_C"; then
-  echo "WARN: a '#ifndef CONFIG_ARM64_ERRATUM_843419' is still present in $MODULE_C"
+  echo "ERROR: a '#ifndef CONFIG_ARM64_ERRATUM_843419' is still present in $MODULE_C"
+  exit 1
 fi
 
 # ---- 3. Prepare generated headers / vmlinux symtab for out-of-tree modpost
@@ -444,7 +419,14 @@ build_mod() {
   # own .<obj>.cmd command file. This is how we prove (or disprove) that
   # -mcmodel=large made it into the compile line.
   local _cmd _flags
-  _cmd=$(find "$KOUT/$CONN/$d" -name '*.o.cmd' 2>/dev/null | head -1)
+  # `find ... | head -1` is a TRAP in this script: it runs under
+  # `set -euo pipefail`, so when find keeps writing after head has exited it dies
+  # on SIGPIPE (141) and pipefail turns that into a failing assignment, which
+  # set -e then treats as fatal. For a module with many objects (common has
+  # hundreds of .o.cmd files) that is guaranteed -- and it is precisely what
+  # killed the run right after the first module, printing no [flags] line and no
+  # other diagnostic. `-print -quit` stops find itself: no pipe, no SIGPIPE.
+  _cmd=$(find "$KOUT/$CONN/$d" -name '*.o.cmd' -print -quit 2>/dev/null)
   if [ -n "$_cmd" ]; then
     _flags=$( { grep -o -E -- '-mcmodel=[a-z]+|-fno-PIE|-fPIE|-fpic|-fPIC|-include [^ ]*emi_compat.h' "$_cmd" || true; } \
               | sort -u | tr '\n' ' ')
@@ -538,7 +520,10 @@ find "$KOUT" "$KROOT/$CONN" -name 'bt_drv.ko'         -exec cp -f {} "$OUTDIR/" 
 echo "=== debug: every .ko produced under KOUT ==="
 find "$KOUT" -type f -name '*.ko' 2>/dev/null | sort || true
 
-_w=$(find "$KOUT" "$KROOT/$CONN" -type f -name 'wlan_*.ko' 2>/dev/null | head -1)
+# Same SIGPIPE/pipefail trap as in build_mod: let find stop itself with
+# -print -quit rather than piping into `head -1`. This one has survived only
+# because it normally matches a single file; it is still a latent failure.
+_w=$(find "$KOUT" "$KROOT/$CONN" -type f -name 'wlan_*.ko' -print -quit 2>/dev/null)
 if [ -n "$_w" ]; then
   cp -f "$_w" "$OUTDIR/wlan_drv_gen4m.ko"
   echo "   wlan core module: $(basename "$_w") -> wlan_drv_gen4m.ko"
