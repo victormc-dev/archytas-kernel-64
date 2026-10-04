@@ -110,6 +110,25 @@ fetch_repo https://github.com/MotorolaMobilityLLC/vendor-mediatek-kernel_modules
 fetch_repo https://github.com/MotorolaMobilityLLC/vendor-mediatek-kernel_modules-connectivity-bt-mt66xx \
           9074126 "$KROOT/$CONN/bt"
 
+# ---- 1b. Align the common WMT struct with the newer Gen4M WLAN core --------
+# Version skew: the Gen4M WLAN core (zainarbani @ ba2c5a5) is newer than the
+# pinned common repo (Motorola @ 364afcf). It registers the WMT wlan callback
+# 'wlan_is_wifi_drv_own_cb' (hifAxiIsWifiDrvOwn in axi.c -- both in the original
+# mtk_axi_probe and in agui's axiWmtRetry), but the common's wmt_exp.h struct
+# MTK_WCN_WMT_WLAN_CB_INFO only has 5 members -> "has no member named
+# 'wlan_is_wifi_drv_own_cb'". Append the missing member (a plain function
+# pointer, same style as the peers just above it) so the WLAN module compiles.
+# Appending keeps every existing member offset unchanged, and the (older)
+# wmt_drv simply never invokes the extra callback -> harmless at runtime.
+WMT_EXP="$KROOT/$CONN/common/common_main/include/wmt_exp.h"
+if [ -f "$WMT_EXP" ] && ! grep -q "wlan_is_wifi_drv_own_cb" "$WMT_EXP"; then
+  awk '{ if ($0 ~ /^\} MTK_WCN_WMT_WLAN_CB_INFO/) print "\tINT32 (*wlan_is_wifi_drv_own_cb)(VOID);"; print }' \
+      "$WMT_EXP" > "$WMT_EXP.new" && mv "$WMT_EXP.new" "$WMT_EXP"
+  echo "   added wlan_is_wifi_drv_own_cb to MTK_WCN_WMT_WLAN_CB_INFO"
+else
+  echo "WARN: $WMT_EXP missing or already patched"
+fi
+
 # ---- 2. Apply agui's 4.9 compatibility patches to the WLAN core ------------
 PATCH1="$KROOT/vendor/archimedes-wlan/0001-mt6761-prealloc-axi-dma.patch"
 PATCH2="$KROOT/Documentation/wifi-coherent-dma-58c7ba5.patch"
