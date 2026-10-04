@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Fetch GitHub Actions logs for this repo and surface the real failure.
 
-Uses the credential already stored by git-credential-manager (never printed).
-Stdlib only.
+Auth comes from port/ci_auth.py (the token is never printed). Stdlib only.
 
 Usage:
     python3 port/ci_logs.py                 # newest run: failed step + failure tail
@@ -13,12 +12,15 @@ Usage:
 import argparse
 import io
 import json
+import os
 import re
-import subprocess
 import sys
 import tempfile
 import urllib.request
 import zipfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ci_auth import token as _token        # noqa: E402
 
 REPO = "victormc-dev/archytas-kernel-64"
 API = "https://api.github.com/repos/" + REPO
@@ -30,17 +32,10 @@ MARKERS = re.compile(
 
 
 def token():
-    try:
-        r = subprocess.run(
-            ["git", "credential", "fill"],
-            input="protocol=https\nhost=github.com\n\n",
-            capture_output=True, text=True, timeout=30)
-        for line in r.stdout.splitlines():
-            if line.startswith("password="):
-                return line.split("=", 1)[1].strip()
-    except Exception:
-        pass
-    return None
+    # Delegated to ci_auth: a credential helper that blocks, plus
+    # subprocess.run(capture_output=True) leaving the helper's grandchild alive
+    # on the pipe, used to hang this script for ten minutes. See ci_auth.py.
+    return _token()
 
 
 def api(path, tok, raw=False):

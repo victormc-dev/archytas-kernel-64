@@ -20,9 +20,12 @@ we install a redirect handler that drops Authorization for the new host.
 import argparse
 import io
 import json
-import subprocess
+import os
 import sys
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ci_auth import token as _token        # noqa: E402
 import zipfile
 from pathlib import Path
 
@@ -45,16 +48,10 @@ OPENER = urllib.request.build_opener(DropAuthOnRedirect)
 
 
 def token():
-    try:
-        r = subprocess.run(["git", "credential", "fill"],
-                           input="protocol=https\nhost=github.com\n\n",
-                           capture_output=True, text=True, timeout=30)
-        for line in r.stdout.splitlines():
-            if line.startswith("password="):
-                return line.split("=", 1)[1].strip()
-    except Exception:
-        pass
-    return None
+    # Delegated to ci_auth: a blocking credential helper plus
+    # subprocess.run(capture_output=True) leaving the helper's grandchild alive
+    # on the pipe used to hang this script indefinitely. See ci_auth.py.
+    return _token()
 
 
 def api(path, tok, raw=False):
