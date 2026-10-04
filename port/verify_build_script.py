@@ -567,10 +567,14 @@ check("workflow no longer packages the unpatched DTB",
 # "template must be an exact 32 MiB Android boot image").
 print("\n== 11. end-to-end size rehearsal against the real 32 MiB template ==")
 
-# Locally the agui4541/archimedes-kernel-64 checkout the workflow creates at
-# `kernel/` is this directory.
-TPL = (ROOT / "archimedes-kernel-64-main" / "tools"
-       / "archimedes-boot-template-32MiB.img")
+# Locally the agui4541/archimedes-kernel-64 checkout sits at
+# archimedes-kernel-64-main/; the workflow checks the same repo out at kernel/.
+TPL = next((p for p in (
+    ROOT / "archimedes-kernel-64-main" / "tools"
+    / "archimedes-boot-template-32MiB.img",
+    ROOT / "kernel" / "tools" / "archimedes-boot-template-32MiB.img",
+) if p.exists()), ROOT / "archimedes-kernel-64-main" / "tools"
+    / "archimedes-boot-template-32MiB.img")
 
 
 def _trailing_fdt(blob):

@@ -800,6 +800,132 @@ ValueError: template must be an exact 32 MiB Android boot image   ← 报错发�
 `--wifi-dtb` 由 `port/wifi_stock.dtb` 改为 `port/wifi_archytas.dtb`（stage2 与 both 两处）。
 `port/build_archytas_wifi.sh` 同步（本地/手动构建走同一条路）。
 
+### 9.8 「多组 CI 打包 boot 报错」= 尺寸坑，已修并验证 ✅（2026-10-04 晚）
+
+**4 个 run 完全同症状**，且**全部挂在同一步** `Package boot images`：
+
+| run | commit | 失败步骤 |
+|---|---|---|
+| 37195442946 | c7e51b5c | Package boot images |
+| 37195448569 | c7e51b5c | Package boot images |
+| 37195532153 | 41dd1110 | Package boot images |
+| 37195577635 | 757fd7ca | Package boot images |
+
+`84fcadd1` 及更早全绿 ⇒ 是 `c7e51b5c`（引入 DTB 补丁那笔）带进来的。
+新增的 "Patch the Wi-Fi DTB" 步骤本身**每一步都成功**，只是把 DTB 做大了：
+
+```
+output=wifi-template-32MiB.img size=33554542      ← 比 32 MiB 多 110
+wifi_dtb_size=84204
+ValueError: template must be an exact 32 MiB Android boot image
+```
+
+`84204 - 84094 = 110`，与镜像超出量 **1:1 对应**。修法见上一小节（复用原字符串块 + 不补尾部 pad）。
+`ebdf48b56` 推送后 run **37196396706 全绿**，`Package boot images` 通过。
+
+#### 关键事实：真实模板余量 = 0，本地有一份**过期模板**
+
+| 文件 | 大小 | kernel_region | 尾部 DTB | 说明 |
+|---|---|---|---|---|
+| `archimedes-kernel-64-main/tools/archimedes-boot-template-32MiB.img` | 33554432 | **10483221** | **84094** | **CI 真正用的**（workflow 把 `agui4541/archimedes-kernel-64` checkout 到 `kernel/`）|
+| `port/wifi-template-32MiB.img` | 33554432 | 10483159 | 84032 | **本地过期残留**，已被 `*.img` 忽略；**别拿它复现** |
+| `port/wifi_stock.dtb`（=`4g_oem_boot.dtb`）| 84032 | — | — | 补丁输入 |
+| `port/4g_stock.dtb` | 84094 | — | — | 厂商同 SoC 修复版，作参照 |
+
+真实模板 `kernel_region = gzip + 84094`，**零余量** ⇒ 补丁后 DTB 必须**正好** 84094 才放得下。
+本地端到端实测：补丁 84094 → 真模板重打包 → **输出精确 33554432，kernel_region 仍为 10483221**（尺寸中性）。
+
+`verify_build_script.py` 新增**第 11 组**（共 **87 项 PASS**）：拿**真实模板**按 workflow 的方式实跑
+`make_wifi_template.py`，断言输出精确 32 MiB、补丁 DTB 完整、kernel_region 不变；并用一个
+"合法但大 1 字节"的 FDT 做**负向对照**，确认护栏拒绝且不落盘。第 1–10 组只验证零件、从不实跑打包，
+这正是本次本地看不出来、却在 CI 炸掉的盲区。
+
+### 9.9 第三个根因已真机确证；Wi-Fi 仍不通，卡在**第四层（WMT/STP）**❌（2026-10-04 晚）
+
+刷入 `37196396706` 的 `boot-archytas-wifi.img`（sha256 `619cb20d…`，回读一致）重启后，
+内核实际看到的 DTB 已是修补版：`compatible=shared-dma-pool\0mediatek,wifi-reserve-memory`、
+`phandle=0xa8`、`no-map`、`reg=0x7f000000+0x300000`，`wifi@18000000` 有 `memory-region`。
+
+**根因 3 的修复在真机上得到了教科书式的对比**：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| `axiDmaSetup` | `of_reserved_mem_device_init failed(-19)` | `assigned reserved memory node wifi-reserve-memory`<br>`base=0x7f000000 size=0x300000, coherent DMA pool attached` |
+| `mtk_wcn_wmt_wlan_reg` | **从未执行**（probe 提前 `goto exit`）| `wmt wlan cb register` ✅ |
+| `mtk_axi_probe` | 中断 | `done, ret: 0` ✅ |
+| 更深一层 | 到不了 | `halSetDriverOwn: DRIVER OWN Done` ← 芯片已上电<br>`wlanSetChipEcoInfo: Chip ID[0001] Version[E1] HW[0x8a00]` ← CONNAC 识别成功<br>`kalFirmwareOpen: WIFI_RAM_CODE_soc1_0_1_1.bin done` ← 固件已载入 |
+
+**但 `wlan0` 仍不出现。** `wifi@1.0-service` 反复重试，WMT 每次都拒绝：
+
+```
+wmt_func_wifi_on: wmt wlan func on before wlan probe
+update_driver_loaded_status: 0
+wmt_func_wifi_on(690): wmt call wlan probe fail(-1)
+WIFI_write[E]: WMT turn on WIFI fail!
+```
+
+#### 第四层：固件下载后的握手超时 → 触发整芯片复位（源码级定位）
+
+完整栈回溯（`dump_stack` 来自 `glResetTrigger`）：
+
+```
+wmt_func_wifi_on → opfunc_wlan_probe → hifAxiProbe → wlanProbe+0x3b0
+  → wlanAdapterStart+0x244            (fw_dl.c:1232   wlanDownloadFW)
+     → wlanDownloadFW+0xe0            (fw_dl.c:2303   downloadFirmware)
+        → wlanConnacFormatDownload+0x11c   (fw_dl.c:2232   wlanConfigWifiFunc)
+           → wlanConfigWifiFunc+0x248      (fw_dl.c:1624   wlanConfigWifiFuncStatus 等响应)
+              → glResetTrigger+0x30        (fw_dl.c:1628   GL_RESET_TRIGGER)
+```
+
+```c
+/* wlan/core/gen4m/chips/common/fw_dl.c:1622 */
+DBGLOG(INIT, INFO, "FW_START CMD send, waiting for RSP\n");
+u4Status = wlanConfigWifiFuncStatus(prAdapter, ucCmdSeqNum);
+if (u4Status != WLAN_STATUS_SUCCESS) {
+    DBGLOG(INIT, INFO, "FW_START EVT failed\n");
+    GL_RESET_TRIGGER(prAdapter, RST_FLAG_CHIP_RESET);   /* ← 喷栈点 */
+}
+```
+
+`wlanProbe: probe failed, reason:3` 里的 **3 = MTK 的 `WLAN_STATUS_FAILURE`**（不是枚举序号）；
+`wlanAdapterStart: Fail reason: 5` 对应 `RAM_CODE_DOWNLOAD_FAIL`。
+`wlanAdapterStart` 的失败枚举（`common/wlan_lib.c:1121`，0 基）：
+`0=ALLOC_ADAPTER_MEM_FAIL, 1=DRIVER_OWN_FAIL, 2=INIT_ADAPTER_FAIL, 3=INIT_HIFINFO_FAIL,
+4=SET_CHIP_ECO_INFO_FAIL, 5=RAM_CODE_DOWNLOAD_FAIL, 6=WAIT_FIRMWARE_READY_FAIL`。
+
+**但真正的第一因在更下层 —— 芯片对 STP 命令完全没有回应：**
+
+```
+[HIF-SDIO][E] wmt_lib_put_act_op(1500): opId(20) completion timeout
+[HIF-SDIO][E] wmt_dev_rx_timeout(461): gRxCount != 0 (-1), reset it!   ← -1 是垃圾值
+[WMT-CORE][E] opfunc_pwr_sv(1534): wmt_core: read HOST_AWAKE_EVT fail(-1) len(0, 6), host trigger f/w assert
+              → wmt_lib_cmb_rst: [whole chip reset] ok!
+...           → wlanConfigWifiFunc: FW_START CMD send, waiting for RSP
+              → 320 ms 后又一次 whole chip reset（这次由 stp_btm 发起）
+              → FW_START EVT failed → glResetTrigger
+```
+
+即：**固件已成功写入芯片 RAM，但芯片从此不再应答任何 STP 命令**（连 WMT 的 HOST_AWAKE 握手都超时）。
+`wlanConfigWifiFunc` 等不到 `FW_START` 响应事件（320 ms 超时），于是 `GL_RESET_TRIGGER` 复位芯片，
+`wlanProbe` 返回失败，`wmt_func_wifi_on` 得到 `fail(-1)`，`wifi@1.0-service` 无限重试 → 永无 `wlan0`。
+
+**已排除**（都正常）：`/vendor/firmware` 固件齐全（`WIFI_RAM_CODE_soc1_0_1_1.bin`、
+`soc1_0_patch_mcu_1_1_hdr.bin`、`soc1_0_ram_{mcu,bt,wifi}_1_1_hdr.bin`、`WMT_SOC.cfg` 12 个文件）；
+`WMT_SOC.cfg` 内容正常；CONSYS HW 层 probe 正常（EMI 清空、EMI MPU、`conn2ap_sw_irq id(242)`）；
+`halSetDriverOwn` / Chip ID 读取正常（AXI 窗口是活的）。
+
+**下一步建议**（尚未验证）：
+1. 与**能工作的 4G 板**做 A/B：同一内核、同一批 `.ko`，只换 DTB/ROM —— 差异只可能是
+   板级 DTB（`consys`/`wmt` 属性、`conn2ap_sw_irq`）或 `/vendor`（firmware / `init.wlan_drv.rc` /
+   `WMT_SOC.cfg`）。这是最省时的切入口。
+2. 重点核对 STP 用的 **CONSYS EMI 共享内存**（`Clearing Connsys EMI physical(0xbf000000) 4194304 bytes`）
+   与 **`conn2ap_sw_irq`**（DTS 里 id 242、trigger 1）：`gRxCount == -1` 这种垃圾值提示
+   STP 的 EMI/中断结构与驱动预期不在同一处。
+3. 注意 `vendor.connsys.driver.ready=yes` 会触发原厂 init 去 `insmod
+   /vendor/lib/modules/{wmt_chrdev_wifi,wlan_drv_gen4m}.ko`，这两条**必然 `Exec format error`**
+   （`/vendor` 内仍是 32 位原厂模块）。目前故意不覆盖以免开机循环，但它可能会打断该 rc 里
+   后续的上电动作 —— 值得对照 `init.wlan_drv.rc` 逐条确认。
+
 ---
 
 *生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*
