@@ -84,20 +84,27 @@ def main():
     jobs = api("/actions/runs/%s/jobs?per_page=50" % run["id"], tok).get("jobs", [])
     bad_jobs = []
     for j in jobs:
-        flag = "" if j["conclusion"] == "success" else "   <<< " + str(j["conclusion"])
-        print("  job %-40s %s%s" % (j["name"][:40], j["conclusion"], flag))
+        state = j["conclusion"] or j["status"]
+        flag = "" if j["conclusion"] == "success" else "   <<< " + str(state)
+        print("  job %-40s %s%s" % (j["name"][:40], state, flag))
         for s in j.get("steps", []):
-            if s["conclusion"] not in ("success", "skipped"):
+            if s["conclusion"] not in ("success", "skipped", None):
                 print("      step %-52s %s" % (s["name"][:52], s["conclusion"]))
-        if j["conclusion"] != "success":
+        # None means the job has not finished yet -- only a real conclusion counts.
+        if j["conclusion"] not in (None, "success", "skipped", "neutral"):
             bad_jobs.append(j)
 
     if not bad_jobs:
-        print("\nno failing job (run may still be in progress)")
+        print("\n%s" % ("run still in progress - nothing has failed yet"
+                        if run["conclusion"] is None else "no failing job"))
         return
 
     print("\n== downloading logs (zip) ==")
-    blob = api("/actions/runs/%s/logs" % run["id"], tok, raw=True)
+    try:
+        blob = api("/actions/runs/%s/logs" % run["id"], tok, raw=True)
+    except Exception as e:
+        print("   could not download logs: %s" % e)
+        return
     zf = zipfile.ZipFile(io.BytesIO(blob))
     names = zf.namelist()
     print("   %d log files" % len(names))
