@@ -44,6 +44,16 @@ command -v git  >/dev/null 2>&1 || { echo "ERROR: git required"; exit 1; }
 command -v patch >/dev/null 2>&1 || echo "WARN: patch not found; relying on git apply only"
 
 # ---- 1. Fetch the four pinned external repos -------------------------------
+# Map of abbreviated -> full 40-hex SHAs (fallback if the GitHub API is
+# unreachable). A bare/abbreviated SHA CANNOT be fetched by Git (the wire
+# protocol needs the full object id), so we must expand it before fetching.
+declare -A FULLSHA=(
+  [364afcf]=364afcfde5c4d952fb67705aacc26456c64eb9dd
+  [e84d47e]=e84d47e835553a6c1f654309341cebe78b96be67
+  [9074126]=90741260b236d9fc808e9c7ff2a650977242833e
+  [ba2c5a5]=ba2c5a57fc22c7e9dc6224b2cee8d8a1c6d98e80
+)
+
 fetch_repo() {
   local url="$1" commit="$2" dest="$3"
   echo ">> fetch $url @ $commit"
@@ -53,22 +63,38 @@ fetch_repo() {
   if ! git clone --depth 1 "$url" "$dest" >/dev/null 2>&1; then
     echo "ERROR: clone failed for $url"; exit 1
   fi
-  # Pin to the exact commit. GitHub allows fetching a bare SHA; try a shallow
-  # fetch first, then a plain fetch, then (last resort) unshallow the clone so
-  # the pinned object is actually reachable before checkout.
-  _pinned=0
-  if git -C "$dest" fetch --depth 1 origin "$commit" >/dev/null 2>&1; then
-    _pinned=1
-  elif git -C "$dest" fetch origin "$commit" >/dev/null 2>&1; then
-    _pinned=1
-  else
-    git -C "$dest" fetch --unshallow origin >/dev/null 2>&1 || true
-    if git -C "$dest" fetch origin "$commit" >/dev/null 2>&1; then
-      _pinned=1
+  # Expand the (possibly abbreviated) commit SHA to its full 40-hex form. Try the
+  # GitHub API first (authoritative), then the hardcoded table, then assume the
+  # given value is already full. Without the full SHA, 'git fetch <sha>' is
+  # rejected by the server and the build silently used the clone tip -- whose
+  # default branch did NOT contain the module Makefile (build broke with
+  # "No rule to make target .../Makefile").
+  local full="$commit"
+  if ! [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      local api="${url%.git}"
+      api="${api#https://github.com/}"
+      api="https://api.github.com/repos/${api}/commits/${commit}"
+      local api_sha
+      api_sha="$(curl -fsSL "$api" 2>/dev/null \
+                 | sed -n 's/^ *"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)"
+      [ -n "$api_sha" ] && full="$api_sha"
     fi
+    [ "$full" = "$commit" ] && [ -n "${FULLSHA[$commit]:-}" ] && full="${FULLSHA[$commit]}"
   fi
-  if [ "$_pinned" = 1 ] && git -C "$dest" checkout -q "$commit" 2>/dev/null; then
-    echo "   pinned to $commit"
+  echo "   using $full"
+  # Fetch the exact commit (GitHub serves any reachable commit by full SHA).
+  if git -C "$dest" fetch --depth 1 origin "$full" >/dev/null 2>&1 \
+     && git -C "$dest" checkout -q "$full" 2>/dev/null; then
+    echo "   pinned to $full"; return 0
+  fi
+  if git -C "$dest" fetch origin "$full" >/dev/null 2>&1 \
+     && git -C "$dest" checkout -q "$full" 2>/dev/null; then
+    echo "   pinned to $full"; return 0
+  fi
+  git -C "$dest" fetch --unshallow origin >/dev/null 2>&1 || true
+  if git -C "$dest" checkout -q "$full" 2>/dev/null; then
+    echo "   pinned to $full"
   else
     echo "WARN: could not checkout $commit in $dest (using clone tip)"
   fi
