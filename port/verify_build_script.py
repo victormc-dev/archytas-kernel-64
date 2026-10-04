@@ -42,6 +42,16 @@ downloaded CI artifact; those skip cleanly when absent). Checks:
      (it is what routes the node to rmem_dma_setup instead of rmem_cma_setup),
      that the patch is idempotent, and that the workflow packages the patched
      DTB. Includes negative controls on the unpatched DTB.
+ 11. end-to-end size rehearsal against the REAL 32 MiB template. The template is
+     byte-exact (kernel region = gzip + the 4G DTB, zero slack), so the patched
+     DTB must be *exactly* the 4G DTB's size -- 84094 B, note 84094 % 4 == 2. This
+     group runs make_wifi_template.py the way the workflow does and asserts the
+     output is exactly 32 MiB, then feeds a valid FDT one byte larger and asserts
+     the guard rejects it. That is the failure mode of run #37195577635: the FDT
+     emitter rebuilt the strings block (+123 B) and padded the blob (+2 B), so the
+     template grew to 33554542 B and package_archimedes_boot.py died one step
+     later with the misleading "template must be an exact 32 MiB Android boot
+     image". Skipped when the agui checkout or the ROM DTB is absent.
 
 The Bash tool rewrites backslashes inside heredocs, so running snippets
 straight from a shell command line is unreliable -- hence this harness.
@@ -544,6 +554,95 @@ check("workflow packages port/wifi_archytas.dtb",
       "wifi-dtb port/wifi_archytas.dtb" in _wf)
 check("workflow no longer packages the unpatched DTB",
       "wifi-dtb port/wifi_stock.dtb" not in _wf)
+
+# ---------------------------------------------------------------- group 11 --
+# End-to-end size rehearsal against the REAL CI template.
+#
+# The 32 MiB boot template is byte-exact: its kernel region is exactly the gzip
+# plus the 4G board DTB, with ZERO slack. Swapping in the Wi-Fi DTB is therefore
+# only possible because the patched DTB is exactly as large as the 4G one. Groups
+# 1-10 check the pieces; this group actually runs the two scripts the way the
+# workflow does, which is what would have caught run #37195577635 locally instead
+# of on CI (it failed with a 33554542-byte template and the misleading
+# "template must be an exact 32 MiB Android boot image").
+print("\n== 11. end-to-end size rehearsal against the real 32 MiB template ==")
+
+# Locally the agui4541/archimedes-kernel-64 checkout the workflow creates at
+# `kernel/` is this directory.
+TPL = (ROOT / "archimedes-kernel-64-main" / "tools"
+       / "archimedes-boot-template-32MiB.img")
+
+
+def _trailing_fdt(blob):
+    """Same rule as make_wifi_template.trailing_fdt: last FDT that ends the blob."""
+    pos = blob.rfind(b"\xd0\x0d\xfe\xed")
+    while pos >= 0:
+        if pos + 8 <= len(blob):
+            size = struct.unpack_from(">I", blob, pos + 4)[0]
+            if size >= 40 and pos + size == len(blob):
+                return pos, size
+        pos = blob.rfind(b"\xd0\x0d\xfe\xed", 0, pos)
+    return None
+
+
+if not TPL.exists():
+    print("   SKIP rehearsal (agui checkout absent: %s)" % TPL.name)
+elif "_out" not in globals():
+    print("   SKIP rehearsal (port/wifi_stock.dtb missing)")
+else:
+    _tpl = TPL.read_bytes()
+    _ks = struct.unpack_from("<I", _tpl, 8)[0]
+    check("CI template is an exact 32 MiB Android boot image",
+          len(_tpl) == 33554432 and _tpl[:8] == b"ANDROID!", "len=%d" % len(_tpl))
+    _tf = _trailing_fdt(_tpl[2048:2048 + _ks])
+    check("CI template carries a trailing board DTB", _tf is not None,
+          "kernel_region=%d" % _ks)
+    if _tf:
+        check("CI template's DTB is exactly the patched DTB's size",
+              _tf[1] == len(_out), "template=%d patched=%d" % (_tf[1], len(_out)))
+        with tempfile.TemporaryDirectory() as _td:
+            _tdp = Path(_td)
+            (_tdp / "wifi_archytas.dtb").write_bytes(_out)
+            _r = subprocess.run(
+                [EXE, str(ROOT / "port" / "make_wifi_template.py"),
+                 "--template", str(TPL),
+                 "--wifi-dtb", str(_tdp / "wifi_archytas.dtb"),
+                 "--output", str(_tdp / "tpl.img")],
+                capture_output=True, text=True)
+            check("make_wifi_template.py accepts the patched DTB on the real template",
+                  _r.returncode == 0, (_r.stderr or _r.stdout).strip()[:200])
+            _img = _tdp / "tpl.img"
+            _isz = _img.stat().st_size if _img.exists() else -1
+            check("...and emits exactly 32 MiB (not 32 MiB + N)",
+                  _isz == 33554432, "size=%d" % _isz)
+            if _isz == 33554432:
+                _o = _img.read_bytes()
+                _of = _trailing_fdt(_o[2048:2048 + _ks])
+                check("...with the patched DTB intact inside",
+                      _of is not None
+                      and _o[2048 + _of[0]:2048 + _of[0] + _of[1]] == _out)
+                check("...and the kernel region length unchanged",
+                      struct.unpack_from("<I", _o, 8)[0] == _ks)
+            # Negative control: a VALID FDT one byte larger must be rejected. It has
+            # to be a real FDT (totalsize bumped) or trailing_fdt would reject it for
+            # the wrong reason. Without the guard, bytearray slice assignment silently
+            # EXTENDS the image and the 32 MiB invariant is lost with no error here.
+            _big = bytearray(_out) + b"\x00"
+            struct.pack_into(">I", _big, 4, len(_big))
+            (_tdp / "too_big.dtb").write_bytes(bytes(_big))
+            _r2 = subprocess.run(
+                [EXE, str(ROOT / "port" / "make_wifi_template.py"),
+                 "--template", str(TPL),
+                 "--wifi-dtb", str(_tdp / "too_big.dtb"),
+                 "--output", str(_tdp / "big.img")],
+                capture_output=True, text=True)
+            _msg = (_r2.stderr + _r2.stdout)
+            check("control: a 1-byte-larger DTB is rejected by the size guard",
+                  _r2.returncode != 0 and "board DTB is" in _msg,
+                  _msg.strip().splitlines()[-1][:160] if _r2.returncode else
+                  "ACCEPTED -- guard missing!")
+            check("control: no oversize image is written",
+                  not (_tdp / "big.img").exists())
 
 print("\n================ %s ================" % (
     "ALL CHECKS PASS" if not failures else "FAILURES: " + ", ".join(failures)))
