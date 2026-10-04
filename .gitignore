@@ -12,6 +12,9 @@ archimedes-kernel-64-main/
 archytas-wifi-boot/
 archytas-wifi-boot-and-modules/
 
+# 从真机拉下来的原厂模块等备份
+port/_device_backup/
+
 # 工作区元数据
 .workbuddy/
 

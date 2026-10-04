@@ -229,13 +229,66 @@ build_mod() {
   # every translation unit. KCFLAGS is the most reliable vehicle because it is
   # folded into KBUILD_CFLAGS for all module compiles regardless of how the
   # module's -objs are laid out across subdirectories.
+  #
+  # -mcmodel=large is MANDATORY on this kernel. The running kernel has
+  #   CONFIG_ARM64_ERRATUM_843419=y (Cortex-A53 erratum), which makes
+  #   arch/arm64/kernel/module.c compile OUT the handlers for the ADRP
+  #   relocations R_AARCH64_ADR_PREL_PG_HI21/_NC (275/276):
+  #       #ifndef CONFIG_ARM64_ERRATUM_843419
+  #           case R_AARCH64_ADR_PREL_PG_HI21: ...
+  #   and arch/arm64/Kconfig expects modules to be built with -mcmodel=large
+  #   ("builds modules using the large memory model in order to avoid the use
+  #   of the ADRP instruction"). arch/arm64/Makefile is supposed to inject it
+  #   via KBUILD_CFLAGS_MODULE, but the out-of-tree (M=) build here does not
+  #   pick that up, so the modules were linked with ~9000 ADRP relocations and
+  #   insmod failed with:
+  #       module wmt_drv: unsupported RELA relocation: 275
+  #   Pass it explicitly. Verified after the build by check_no_adrp() below.
   make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
        HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" \
-       KCFLAGS="-Wno-error -include $WLAN_DIR/emi_compat.h" \
+       KCFLAGS="-mcmodel=large -Wno-error -include $WLAN_DIR/emi_compat.h" \
        AUTOCONF_H="$AUTOCONF" KERNEL_OUT="$KOUT" TOP="$KROOT" \
        KBUILD_MODPOST_FAIL_ON_WARNINGS= \
        M="$CONN/$d" "$@" modules -j"$JOBS"
 }
+
+# Refuse to ship a module that still contains ADRP (275/276) relocations: the
+# running kernel rejects those with -ENOEXEC. A module that cannot insmod is
+# worse than a red CI run, so fail loudly and point at the cause.
+check_no_adrp() {
+  local ko="$1"
+  python3 - "$ko" <<'PY'
+import struct, sys
+p = sys.argv[1]
+d = open(p, "rb").read()
+if d[:4] != b"\x7fELF" or d[4] != 2:
+    sys.exit("not a 64-bit ELF: %s" % p)
+(_t, _m, _v, _e, _po, shoff, _f,
+ _eh, _pe, _pn, shentsize, shnum, shstrndx) = struct.unpack_from("<HHIQQQIHHHHHH", d, 16)
+secs = []
+for i in range(shnum):
+    o = shoff + i * shentsize
+    secs.append(struct.unpack_from("<IIQQQQIIQQ", d, o))
+shstr_off = secs[shstrndx][4]
+def nm(x):
+    e = d.index(b"\0", shstr_off + x)
+    return d[shstr_off + x:e].decode("utf-8", "replace")
+bad = 0
+for s in secs:
+    if s[1] not in (4, 9) or not nm(s[0]).startswith(".rel"):
+        continue
+    esz = s[9] or 24
+    for k in range(s[5] // esz):
+        r_info = struct.unpack_from("<Q", d, s[4] + k * esz + 8)[0]
+        if (r_info & 0xFFFFFFFF) in (275, 276):
+            bad += 1
+if bad:
+    sys.exit("FAIL: %s has %d ADRP(275/276) relocations -> kernel will reject it "
+             "(-ENOEXEC). -mcmodel=large did not take effect." % (p, bad))
+print("   ADRP check OK: %s" % p)
+PY
+}
+
 
 build_mod common  CONFIG_MTK_COMBO_CHIP=CONSYS_6761
 build_mod wlan/adaptor CONFIG_MTK_COMBO_CHIP=CONSYS_6761
@@ -299,6 +352,11 @@ if [ -n "$_missing" ]; then
   exit 1
 fi
 echo "   OK: all 4 connectivity modules present."
+
+# Every shipped module must be insmod-able on the target kernel: no ADRP.
+for m in "$OUTDIR"/*.ko; do
+  check_no_adrp "$m"
+done
 
 # vermagic sanity check
 echo "=== vermagic ==="
