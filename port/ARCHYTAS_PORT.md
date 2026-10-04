@@ -356,6 +356,85 @@ profile 必须在 strip 之前、`.modinfo` 必须在 strip 之后。
 - `port/dump_relocs.py <ko> [--targets]`：AArch64 重定位统计；`--targets` 按 `st_shndx` 解析节符号
   （判断 ADRP 指向哪一节，是定位本问题的关键）。
 
+## 9. 真机结果：ADRP 修复已被证实，卡在 WMT probe 崩溃（2026-10-04 17:2x）
+
+第一次把 CI 产物真正刷进设备并加载模块。**方法上有个重要变化：不再需要 BROM/短接。**
+
+### 9.1 刷机路径：用 root + dd 直接写 boot（比 MTKClient 安全得多）
+
+设备上 `adbd` 已经是 root（`adb shell id` → `uid=0`；重启后会降回 shell，`adb root` 可恢复），
+于是不必进下载模式、不用短接 test point：
+
+| 步骤 | 命令要点 |
+| --- | --- |
+| 备份（强制） | `dd if=/dev/block/by-name/boot of=/data/local/tmp/bak/…` + `adb pull` |
+| 写入 | `dd if=/data/local/tmp/newboot.img of=/dev/block/by-name/boot bs=1M` |
+| 回读校验 | `dd if=/dev/block/by-name/boot bs=1M \| sha256sum` 必须等于**待刷镜像的 sha256** |
+| 重启 | `adb reboot` |
+
+分区尺寸正好等于镜像：`boot` = mmcblk0p25 = 32 MiB，`dtbo` = mmcblk0p27 = 8 MiB。
+本次记录：备份 `78db70e2…`（Oct 2 内核）、待刷 `3060785b…`（Oct 4 内核）→ 回读一致。
+**`dtbo` 未动**（设备仍是 Wi-Fi 原厂 dtbo），`vbmeta` 未动（当前自定义 boot 本来就能启，说明 AVB 已不拦）。
+
+### 9.2 结果：ADRP 修复生效 ✅
+
+刷后 `uname` 变成 `Sun Oct 4 08:58:54 UTC 2026`（新内核）。同一个模块、同一台设备：
+
+| | 旧内核（Oct 2 23:38） | 新内核（Oct 4 08:58） |
+| --- | --- | --- |
+| `insmod wmt_drv.ko`（9014 个 ADRP） | `Exec format error`，dmesg：**`unsupported RELA relocation: 275`** | **rc=0** ✅ |
+| `insmod wmt_chrdev_wifi.ko`（197 个 ADRP） | `No such file or directory`（符号未解析） | **rc=0** ✅ |
+
+这正面证伪了"`-mcmodel=large` 没生效"的旧诊断，也证实 `patch_adrp_reloc.py` 的内核侧修复是对的。
+
+> 顺带一个坑：`insmod` 必须以 root 跑。重启后 adbd 默认降为 shell，此时任何 `insmod` 都返回
+> `Operation not permitted`(EPERM) —— 这不是内核策略拦的，只是缺 `CAP_SYS_MODULE`。
+> 差点把它误读成"模块签名校验"。
+
+### 9.3 新阻塞：`wmt_drv` 的 `mtk_wmt_probe` 空指针 → kernel panic ❌
+
+加载 `wlan_drv_gen4m.ko` 时 adb 断开。查 `console-ramoops`（`androidboot.bootreason=kernel_panic`）：
+
+```
+[327.976602] mtk_wcn_get_consys_ic_ops:Does not support on combo          <- 关键前兆
+[327.976612] wmt_export_platform_bridge_register:
+[327.978507] Internal error: Accessing user space memory outside uaccess.h routines: 96000005
+             PC is at mtk_wmt_probe+0x40/0x400 [wmt_drv]
+             LR is at platform_drv_probe+0x58/0xd0
+             Modules linked in: wmt_chrdev_wifi … wmt_drv …
+```
+
+调用链（由内向外）：
+`WMT_compat_detect_ioctl` → `wmt_detect_unlocked_ioctl` → `mtk_wcn_common_drv_init` →
+`wmt_lib_init` → `wmt_plat_init` → `mtk_wcn_consys_hw_init` → `__platform_driver_register` →
+`driver_attach` → `platform_drv_probe` → **`mtk_wmt_probe`**。
+
+触发者是**厂商用户态 `wmt_loader`**（32 位），它在 `wmt_drv` 的字符设备出现后立刻下发 ioctl，
+这是原厂正常流程 —— 也就是说这条路径一到就会崩。
+
+判读要点：
+
+- ESR `96000005` = EL1 数据异常、level-1 translation fault。
+- 内核把**任何 < TASK_SIZE 的故障地址**都报成 “Accessing user space memory outside uaccess.h routines”，
+  所以这条消息**不等于**"32 位 ABI 问题"，NULL 附近的小偏移也会这样报。崩溃时 `x0=x1=x2=0`。
+- 最可能：`mtk_wcn_get_consys_ic_ops()` 返回 NULL（"Does not support on combo"），
+  `mtk_wmt_probe` 未判空即解引用。
+- **已排除**：DT 缺节点。运行时 `/sys/firmware/devices/18002000.consys` 存在，
+  DTB 里 `consys@18002000` 完整（`compatible = "mediatek,mt6761-consys"`，11 段 `reg`、`clocks`、`wifi@18000000` 都在）。
+
+所以方向是**构建配置**：`build_mod common` 传的是 `CONFIG_MTK_COMBO_CHIP=CONSYS_6761`
+（而 `build_mod wlan` 传的是 `MTK_COMBO_CHIP=MT6761`，两边命名不一致，可疑），
+导致选中的 consys IC-ops 变体在这颗 SoC 上不存在。
+
+### 9.4 设备当前状态与风险
+
+- 设备现在跑新内核，**启动正常、稳定**（uptime 持续增长，`lsmod` 为空，`wmt_loader`/`wmt_launcher` 在 nanosleep 等待）。
+- Wi-Fi 仍然不通 —— 与刷机前一致，没有回退化。**新内核严格更优**（是它让 64 位模块变得可加载），所以**不需要回滚**。
+- ⚠️ **不要把 64 位 `.ko` 拷进 `/vendor/lib/modules/`**：原厂 init 会在开机时 `insmod` 它们，
+  从而必然触发上面的 panic → **开机循环**。目前只从 `/data/local/tmp/wifi64` 手动 `insmod`，不持久化。
+- 回滚路径：`dd if=port/_device_backup/bak_before_adrp/bak_before_adrp/boot.img of=/dev/block/by-name/boot bs=1M`。
+- 崩溃日志已归档：`port/_device_backup/panic_20261004/console-ramoops.txt`。
+
 ---
 
 *生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*

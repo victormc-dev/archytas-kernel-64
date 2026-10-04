@@ -14,6 +14,7 @@ import hashlib
 import struct
 import zlib
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 BOOT_DIR = ROOT / "archytas-wifi-boot"
@@ -78,6 +79,16 @@ def parse_image(path: Path) -> dict:
 
 
 def main() -> None:
+    # Optional arguments: image paths to check INSTEAD of the two canonical ones
+    # in archytas-wifi-boot/. Point them at a freshly unpacked CI artifact before
+    # flashing it -- the canonical files may be from an older build, and nothing
+    # says so on the filename.
+    #   python3 port/validate_boot.py _ci/<run>/boot-archytas-wifi*.img
+    targets = [Path(a) for a in sys.argv[1:]] or [
+        BOOT_DIR / "boot-archytas-wifi-stage1.img",
+        BOOT_DIR / "boot-archytas-wifi.img",
+    ]
+
     wifi_ref = WIFI_DTB.read_bytes() if WIFI_DTB.exists() else b""
     wifi_sha = hashlib.sha256(wifi_ref).hexdigest() if wifi_ref else "(无参考文件)"
 
@@ -95,8 +106,8 @@ def main() -> None:
             print(f"[警告] 无法从模板抽取 DTB({e})，改用 HANDOFF 记录 SHA\n")
 
     ok = True
-    for name in ("boot-archytas-wifi-stage1.img", "boot-archytas-wifi.img"):
-        p = BOOT_DIR / name
+    for p in targets:
+        name = str(p)
         if not p.exists():
             print(f"[缺失] {name}")
             ok = False
@@ -107,7 +118,9 @@ def main() -> None:
             print(f"[解析失败] {name}: {e}")
             ok = False
             continue
-        is_stage1 = "stage1" in name
+        # Stage1 carries the 4G template DTB, Stage2 the Wi-Fi one. Decide by the
+        # DTB itself rather than by the filename, so an arbitrary path works.
+        is_stage1 = ("stage1" in name) or (r["dtb_sha"] == tpl_dtb_sha)
         stage = "Stage1(4G 模板)" if is_stage1 else "Stage2(Wi-Fi DTB)"
         cmd_ok = EXPECT_CMD in r["cmdline"].encode()
         if is_stage1:
