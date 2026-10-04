@@ -646,12 +646,39 @@ fi
 # Setting MTK_ANDROID_WMT=y also makes the wlan Makefile emit
 # -I.../common/common_main/include and .../common_main/linux/include, which is
 # where wmt_exp.h (and its deps osal.h/wmt_plat.h/stp_exp.h) live.
-build_mod wlan    MTK_COMBO_CHIP=MT6761 \
+#
+# MTK_COMBO_CHIP=CONNAC (the chip FAMILY, not the chip part number) is what
+# actually selects the Wi-Fi chip layer -- see Gate #2 just below.  WLAN_CHIP_ID is set
+# explicitly, exactly as the vendor's own Android.mk does
+# (wlan/Android.mk:14 passes `MTK_COMBO_CHIP=$(WIFI_CHIP) WLAN_CHIP_ID=$(WLAN_CHIP_ID)`),
+# and it only feeds `wlan_<lower(WLAN_CHIP_ID)>_<HIF>` plus a few per-part
+# tweaks (6765/6873/6779), so this keeps the module name wlan_mt6761_axi.ko.
+build_mod wlan    MTK_COMBO_CHIP=CONNAC \
+                    WLAN_CHIP_ID=MT6761 \
                     MTK_ANDROID_WMT=y \
                     CONFIG_MTK_COMBO_WIFI_HIF=axi \
                     CONFIG_MTK_COMBO_WIFI=m \
                     CONFIG_WLAN_DRV_BUILD_IN=n
 collect_mod wlan
+
+# Gate #2: the CONNAC chip layer MUST have been compiled. Without
+# MTK_COMBO_CHIP=CONNAC the wlan Makefile simply never adds
+# chips/connac/connac.o (Makefile:590-592) -- while cmm_asic_connac.o and
+# dbg_connac.o are added UNCONDITIONALLY, so the module still looks like it has
+# connac code in it. What is really missing is the chip data: connac.c provides
+# mt66xx_driver_data_connac, which is `mtk_axi_ids[0].driver_data`. With it NULL,
+# mtk_axi_probe+0x2c dereferences NULL on the very first probe and the device
+# panics (observed: PC is at mtk_axi_probe+0x2c/0x48, x1 = 0).
+if [ -f "$KOUT/$CONN/wlan/chips/connac/connac.o" ]; then
+  echo "   OK: chips/connac/connac.o compiled (CONNAC chip layer present)"
+else
+  echo "ERROR: $KOUT/$CONN/wlan/chips/connac/connac.o missing."
+  echo "       wlan/Makefile:590 gates it on \$(filter CONNAC,\$(MTK_COMBO_CHIP));"
+  echo "       the chip FAMILY must be CONNAC even though the part is MT6761."
+  echo "       Without it mtk_axi_ids[0].driver_data is NULL and mtk_axi_probe"
+  echo "       panics on the first probe."
+  exit 1
+fi
 
 build_mod wlan/adaptor CONFIG_MTK_COMBO_CHIP="$COMBO_CHIP_MAKE"
 collect_mod wlan/adaptor
@@ -666,8 +693,10 @@ collect_mod bt
 #
 # The wlan-core module name is DERIVED by its own Makefile, NOT fixed:
 #   MODULE_NAME := wlan_<lower(WLAN_CHIP_ID)>_<CONFIG_MTK_COMBO_WIFI_HIF>
-#   WLAN_CHIP_ID = $(word 1, $(MTK_COMBO_CHIP))
-# We invoke it with MTK_COMBO_CHIP=MT6761 + HIF=axi, so the real filename is
+#   WLAN_CHIP_ID = $(word 1, $(MTK_COMBO_CHIP))    # only when it is not passed
+# We pass WLAN_CHIP_ID=MT6761 explicitly (the chip FAMILY lives in
+# MTK_COMBO_CHIP=CONNAC, so the `word 1` fallback would yield "connac"), with
+# HIF=axi -- so the real filename is
 #   wlan_mt6761_axi.ko          (note the 'mt' prefix: lower('MT6761')='mt6761')
 # The old hardcoded 'wlan_6761_axi.ko' never matched, so this step silently
 # dropped the main Wi-Fi driver and the artifact shipped with only 3 of 4 .ko.
@@ -765,7 +794,7 @@ if [ -n "$_missing" ]; then
 fi
 echo "   OK: all 4 connectivity modules present."
 
-# Gate #2: the WMT IC-ops provider must be a STRONG symbol in the SHIPPED bytes.
+# Gate #3: the WMT IC-ops provider must be a STRONG symbol in the SHIPPED bytes.
 # A surviving __weak stub is not a cosmetic warning -- it IS the NULL-deref panic
 # (see step 3b), so the build fails here rather than on the device.
 #
@@ -785,6 +814,33 @@ else
   echo "       platform probe (mtk_wmt_probe -> NULL wmt_consys_ic_ops)."
   echo "       Re-check step 3b: CONFIG_MTK_COMBO_CHIP must be quoted, and"
   echo "       common_main/platform/$MTK_PLATFORM_VALUE.o must be in the link."
+  exit 1
+fi
+
+# Gate #4: the wlan core must still carry its chip driver data.
+#
+# mtk_axi_probe() reads its chip description from the platform_device_id table:
+#     prDriverData = (struct mt66xx_hif_driver_data *) mtk_axi_ids[0].driver_data;
+#     prChipInfo   = prDriverData->chip_info;
+# and `mtk_axi_ids[0].driver_data` is compiled in ONLY under #ifdef CONNAC /
+# CONNAC2X2 / SOC3_0 (axi.c:101-114).  If the chip family is not selected the
+# entry stays zero, prDriverData is NULL, and the very first probe faults:
+#     PC is at mtk_axi_probe+0x2c/0x48 [wlan_mt6761_axi]   x1 = 0  -> panic
+# So require the selected chip's driver data to be a real GLOBAL OBJECT in the
+# shipped bytes.  chips/connac/connac.o (Gate #2) is the mechanism; this is the
+# observable outcome, and it is what actually keeps the device alive.
+echo "=== wlan chip driver-data gate (mtk_axi_ids[] must be non-NULL) ==="
+_wsym=$(python3 "$PORT/elf_symbols.py" "$OUTDIR/wlan_drv_gen4m.ko" \
+        --grep '^mt66xx_driver_data_' 2>&1) || true
+printf '%s\n' "$_wsym"
+if printf '%s\n' "$_wsym" | grep -qE '^  mt66xx_driver_data_[A-Za-z0-9_]+ +GLOBAL +OBJECT'; then
+  echo "   OK: chip driver data present -> mtk_axi_ids[0].driver_data is non-NULL."
+else
+  echo "ERROR: wlan_drv_gen4m.ko defines NO mt66xx_driver_data_* object."
+  echo "       mtk_axi_ids[0].driver_data is therefore 0 and mtk_axi_probe"
+  echo "       will dereference NULL and panic the device. Re-check the wlan"
+  echo "       build_mod invocation above: MTK_COMBO_CHIP must carry the chip"
+  echo "       FAMILY (CONNAC for MT6761), not the part number."
   exit 1
 fi
 

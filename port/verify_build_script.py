@@ -28,6 +28,11 @@ downloaded CI artifact; those skip cleanly when absent). Checks:
      common_main/platform/mt6761.o -- the module then kept the __weak
      mtk_wcn_get_consys_ic_ops stub and mtk_wmt_probe() panicked on a NULL
      wmt_consys_ic_ops. Includes a negative control on the pre-fix artifact.
+  9. the wlan core's chip FAMILY selection. `MTK_COMBO_CHIP=MT6761` selects
+     nothing: wlan/Makefile keys the chip layer off the family word (CONNAC), so
+     chips/connac/connac.o was never compiled and `mtk_axi_ids[0].driver_data`
+     stayed 0 -> mtk_axi_probe+0x2c dereferenced NULL and panicked. Also includes
+     a negative control.
 
 The Bash tool rewrites backslashes inside heredocs, so running snippets
 straight from a shell command line is unreliable -- hence this harness.
@@ -342,6 +347,65 @@ else:
         check("negative control: the pre-fix build shows WEAK + no IC ops table",
               "WEAK" in out and re.search(r"^  consys_ic_ops\s", out, re.M) is None,
               out.strip().replace("\n", " | ")[:160])
+
+print("\n== 9. wlan core chip FAMILY (CONNAC) + driver-data gate ==")
+_i_bwl = next((li for li, d in _builds if d == "wlan"), None)
+_i_bad = next((li for li, d in _builds if d == "wlan/adaptor"), None)
+_i_g2 = next((i for i, l in enumerate(_logical)
+              if "CONNAC chip layer present" in l), None)
+_i_g4 = next((i for i, l in enumerate(_logical)
+              if "mtk_axi_ids[] must be non-NULL" in l), None)
+
+check("the chip FAMILY (CONNAC) is passed to the wlan core build",
+      bool(re.search(r"build_mod wlan\b[\s\S]{0,140}?MTK_COMBO_CHIP=CONNAC", text)))
+check("the part number no longer stands in for the family",
+      "MTK_COMBO_CHIP=MT6761" not in text,
+      "a bare part number selects no chip layer at all")
+check("WLAN_CHIP_ID is set explicitly, as the vendor Android.mk does",
+      bool(re.search(r"build_mod wlan\b[\s\S]{0,200}?WLAN_CHIP_ID=MT6761", text)))
+check("chips/connac/connac.o gate runs after build_mod wlan, before the next module",
+      None not in (_i_bwl, _i_g2, _i_bad) and _i_bwl < _i_g2 < _i_bad,
+      "wlan@%s gate@%s next@%s" % (_i_bwl, _i_g2, _i_bad))
+check("driver-data symbol gate runs after the strip (gates the shipped .ko)",
+      None not in (_i_g4, _i_strip) and _i_strip < _i_g4,
+      "strip@%s gate@%s" % (_i_strip, _i_g4))
+check("driver-data gate goes through port/elf_symbols.py",
+      _i_g4 is not None and "elf_symbols.py" in "\n".join(_logical[_i_g4 + 1: _i_g4 + 3]))
+
+_rxw = re.findall(r"grep -qE '(\^  mt66xx_driver_data_[^']+)'", text)
+check("driver-data gate regex is present", len(_rxw) == 1, "found %d" % len(_rxw))
+if len(_rxw) == 1:
+    rxw = re.compile(_rxw[0])
+    VENDOR = ("  mt66xx_driver_data_connac                      "
+              "GLOBAL OBJECT  3     0x3c60       4")
+    EMPTY = "  -- 0 matching symbol(s)"
+    check("gate matches a real driver-data object", bool(rxw.match(VENDOR)),
+          VENDOR.strip())
+    check("gate rejects an empty driver-data table", not rxw.match(EMPTY),
+          EMPTY.strip())
+
+# Functional test on real modules: the vendor's 32-bit wlan core has the object,
+# our pre-fix aarch64 build does not -- which is exactly the panic condition.
+WSTOCK = ROOT / "port" / "_device_backup" / "modules_stock" / "wlan_drv_gen4m.ko"
+PREW = ROOT / "_ci" / "37193565582" / "wlan_drv_gen4m.ko"
+if not SYMBOLS.exists() or not WSTOCK.exists():
+    print("   SKIP (need port/elf_symbols.py and the stock vendor wlan module)")
+else:
+    r = subprocess.run([EXE, str(SYMBOLS), str(WSTOCK),
+                        "--grep", r"^mt66xx_driver_data_"], capture_output=True, text=True)
+    check("stock vendor wlan core carries mt66xx_driver_data_* (control: PASS)",
+          r.returncode == 0 and "GLOBAL OBJECT" in r.stdout,
+          (r.stdout + r.stderr).strip().replace("\n", " | ")[:160])
+    if not PREW.exists():
+        print("   SKIP negative control (pre-fix wlan artifact not downloaded)")
+    else:
+        r = subprocess.run([EXE, str(SYMBOLS), str(PREW),
+                            "--grep", r"^mt66xx_driver_data_"],
+                           capture_output=True, text=True)
+        check("negative control: the pre-fix wlan core has NO driver data",
+              "matching symbol(s)" in r.stdout
+              and re.search(r"^  mt66xx_driver_data_", r.stdout, re.M) is None,
+              r.stdout.strip().replace("\n", " | ")[:160])
 
 print("\n================ %s ================" % (
     "ALL CHECKS PASS" if not failures else "FAILURES: " + ", ".join(failures)))
