@@ -45,10 +45,15 @@ jobs:
       - name: Install cross toolchain and build deps
         run: |
           sudo apt-get update
+          # binutils-aarch64-linux-gnu is pulled in by gcc anyway, but the
+          # module step now needs aarch64-linux-gnu-strip by name (it strips
+          # debug info the way INSTALL_MOD_STRIP=1 does), so ask for it.
           sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu build-essential bc flex bison \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            build-essential bc flex bison \
             libssl-dev python3 git ca-certificates
           aarch64-linux-gnu-gcc --version | head -1
+          aarch64-linux-gnu-strip --version | head -1
 
       - name: Copy Archytas (Wi-Fi) defconfig into kernel tree
         run: |

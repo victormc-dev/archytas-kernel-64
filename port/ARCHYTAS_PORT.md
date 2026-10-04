@@ -307,7 +307,38 @@ mtk reset
 - 末尾识别 wlan-core 的 `find | head -1` 换成 **glob 循环**（同一个 pipefail/SIGPIPE 陷阱），
   并显式跳过已重命名的 `wlan_drv_gen4m.ko`，避免把上一轮的产物当成新编的模块。
 
-### 8.6 本地校验工具
+### 8.6 体积：文件大小 ≠ 内存占用（顺手修掉 57 MiB 重复）
+
+run #37190391324 全绿后，产物里出现两个问题：`wlan_mt6761_axi.ko` 与 `wlan_drv_gen4m.ko`
+是**同一份 57 MiB 文件的两份拷贝**（重命名时没删原件）；以及 `.ko` 文件大得离谱。
+
+用 `port/elf_debug_share.py` 量了一遍（能同时解析 64 位自编模块与 32 位原厂模块）：
+
+| 模块 | 原厂 32 位 文件 | 我们 64 位 文件 | 我们 `strip -g` 后 | **ALLOC（insmod 真正映射）** |
+| --- | --- | --- | --- | --- |
+| `bt_drv.ko` | 25,888（已 strip） | 461,496 | 240,193 | 21,878 vs 原厂 19,552 |
+| `wmt_chrdev_wifi.ko` | 23,592（已 strip） | 686,368 | 342,804 | 17,241 vs 原厂 13,358 |
+| `wmt_drv.ko` | 874,268（已 strip） | 8,879,904 | 5,072,216 | 1,135,019 vs 原厂 963,846 |
+| `wlan_drv_gen4m.ko` | 2,046,580（已 strip） | 57,129,152 | ~29,000,000 | — |
+
+三条结论：
+
+1. **原厂模块本来就是 strip 过的** —— 七个原厂 `.ko` 全部报 `strip -g removes 0 bytes`。
+   我们这批带 `-g`（defconfig 里 `CONFIG_DEBUG_INFO`），debug 节占 **43–50%**。
+   已加 step 5b（`strip -g`，等同 Kbuild 的 `INSTALL_MOD_STRIP=1`）。
+2. **文件大小不是 insmod 的障碍**：内核只映射 `SHF_ALLOC` 节，我们的 ALLOC 只有
+   17 KiB / 21 KiB / 1.08 MiB，与原厂 32 位模块（13 / 19 / 941 KiB）同一量级
+   （差距就是 64 位指针的自然膨胀）。57 MiB 只是 **adb push 与分区空间的成本**。
+3. 为避免"strip 静默失败"或"strip 弄坏模块"两种静默故障，做了双向自证：
+   - `strip` 后**重新**跑 `.modinfo` 提取（`.modinfo` / `__versions` 必须仍可读）；
+   - 若某个 `.ko` strip 后**没有变小**，打印 `WARN`。
+   - `report_relocs()` 有意排在 strip **之前**（`DW_AT_producer` 在 `.debug_info` 里，strip 后就没了）；
+     `strip -g` 不动 `.rela.*`，所以那时打印的 ADRP 计数仍然描述所交付的文件。
+
+`port/verify_build_script.py` 第 6 组同步加了三条结构断言：重命名后必须删掉原件、
+profile 必须在 strip 之前、`.modinfo` 必须在 strip 之后。
+
+### 8.7 本地校验工具
 
 - `port/verify_build_script.py`：改脚本后**先跑它**。含 7 组检查：`bash -n`；
   **禁止无兜底的 `| head` 管道**（脚本是 `set -euo pipefail`，`find|head` 的 SIGPIPE 141 会被当成致命失败 ——

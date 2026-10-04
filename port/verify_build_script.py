@@ -218,6 +218,26 @@ check("artifact assertion covers all four modules",
 check("rename step skips an already-renamed wlan_drv_gen4m.ko",
       "case \"$_cand\" in *'/wlan_drv_gen4m.ko') continue" in text)
 
+# (e) the pre-rename copy must be deleted, or the artifact glob ships the same
+#     ~55 MiB wlan core twice.
+_i_rmdup = next((i for i, l in enumerate(_logical) if l.startswith('rm -f "$_w"')), None)
+check("pre-rename wlan core copy is removed (no 55 MiB duplicate)", _i_rmdup is not None)
+
+# (f) ordering: relocation profile (which needs .debug_info for DW_AT_producer)
+#     -> strip -g -> .modinfo dump. Profiling after the strip would lose the
+#     codegen flags; verifying modinfo before the strip would not prove the
+#     SHIPPED bytes are intact.
+_i_prof = next((i for i, l in enumerate(_logical)
+                if l.startswith('echo "=== relocation profile ==="')), None)
+_i_strip = next((i for i, l in enumerate(_logical) if '"$STRIP" -g "$_m"' in l), None)
+_i_modi = next((i for i, l in enumerate(_logical)
+                if l.startswith('echo "=== modinfo')), None)
+check("relocation profile is read before the strip", None not in (_i_prof, _i_strip)
+      and _i_prof < _i_strip, "profile=%s strip=%s" % (_i_prof, _i_strip))
+check(".modinfo is re-read AFTER the strip (verifies the shipped bytes)",
+      None not in (_i_strip, _i_modi) and _i_strip < _i_modi,
+      "strip=%s modinfo=%s" % (_i_strip, _i_modi))
+
 print("\n== 7. .modinfo extractor on real artifacts ==")
 mm = re.search(r"python3 - \"\$m\" <<'PY'\n(.*?)\nPY\n", text, re.S)
 kos = sorted(ART.glob("*.ko")) if ART.exists() else []

@@ -58,6 +58,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="download the logs even when nothing failed -- needed "
+                         "to read the self-checks (relocation profile, modinfo, "
+                         "gate lines) of a GREEN run")
+    ap.add_argument("--step", default="",
+                    help="only these step logs (substring of the log entry name, "
+                         "e.g. 'Connectivity')")
     ap.add_argument("--tail", type=int, default=120)
     ap.add_argument("--grep", default="")
     args = ap.parse_args()
@@ -80,6 +87,17 @@ def main():
     print("run #%s  conclusion=%s  sha=%s  event=%s  %s"
           % (run["id"], run["conclusion"], run["head_sha"][:9], run["event"],
              run["html_url"]))
+    # Wall-clock duration is the quickest way to tell whether the fast lane
+    # (modules_only=true) actually kicked in instead of a full kernel build.
+    t0, t1 = run.get("run_started_at") or run["created_at"], run.get("updated_at")
+    if t0 and t1:
+        try:
+            from datetime import datetime
+            fmt = "%Y-%m-%dT%H:%M:%SZ"
+            d = datetime.strptime(t1, fmt) - datetime.strptime(t0, fmt)
+            print("  duration %d min %02d s" % (d.seconds // 60, d.seconds % 60))
+        except Exception:
+            pass
 
     jobs = api("/actions/runs/%s/jobs?per_page=50" % run["id"], tok).get("jobs", [])
     bad_jobs = []
@@ -94,10 +112,12 @@ def main():
         if j["conclusion"] not in (None, "success", "skipped", "neutral"):
             bad_jobs.append(j)
 
-    if not bad_jobs:
+    if not bad_jobs and not args.force:
         print("\n%s" % ("run still in progress - nothing has failed yet"
                         if run["conclusion"] is None else "no failing job"))
         return
+    if not bad_jobs:
+        print("\n(nothing failed -- --force: dumping the logs anyway)")
 
     print("\n== downloading logs (zip) ==")
     try:
@@ -109,7 +129,10 @@ def main():
     names = zf.namelist()
     print("   %d log files" % len(names))
 
-    wanted = [n for n in names if any(j["name"].replace(" / ", "/") in n for j in bad_jobs)]
+    wanted = [n for n in names if any(j["name"].replace(" / ", "/") in n
+                                      for j in (bad_jobs or jobs))]
+    if args.step:
+        wanted = [n for n in wanted if args.step.lower() in n.lower()]
     if not wanted:
         wanted = sorted(names, key=lambda n: zf.getinfo(n).file_size)[-3:]
     for n in wanted:

@@ -592,13 +592,67 @@ done
 if [ -n "$_w" ]; then
   cp -f "$_w" "$OUTDIR/wlan_drv_gen4m.ko"
   echo "   wlan core module: $(basename "$_w") -> wlan_drv_gen4m.ko"
+  # Drop the pre-rename copy. collect_mod() names it wlan_mt6761_axi.ko, and
+  # without this the artifact glob *.ko would ship the SAME ~55 MiB module twice.
+  rm -f "$_w"
 else
   echo "ERROR: wlan core module (wlan_*.ko) not found in $OUTDIR;"
   echo "       expected wlan_mt6761_axi.ko -- see the build log above"
   exit 1
 fi
 
-echo "=== built connectivity modules ==="
+# Relocation profile of every module.
+#
+# Deliberately read BEFORE the strip below: report_relocs() recovers the codegen
+# flags (-mcmodel=large, -fno-pic, ...) from the DW_AT_producer string, which
+# only exists in .debug_info. `strip -g` does not touch .rela.*, so the ADRP
+# counts printed here still describe the file we go on to ship.
+echo "=== relocation profile ==="
+for m in "$OUTDIR"/*.ko; do
+  report_relocs "$m"
+done
+
+# ---- 5b. Strip debug info --------------------------------------------------
+# Same as INSTALL_MOD_STRIP=1 (Kbuild uses --strip-debug), and the vendor's own
+# modules on the device are stripped: measured with port/elf_debug_share.py, all
+# seven stock modules report `strip -g removes 0 bytes`.
+#
+# The debug data is 43-50% of our modules (the defconfig keeps -g):
+#   bt_drv.ko          461,496 -> 240,193
+#   wmt_chrdev_wifi.ko 686,368 -> 342,804
+#   wmt_drv.ko       8,879,904 -> 5,072,216
+#   wlan core       57,129,152 -> ~29,000,000
+#
+# Note what this does NOT change: SHF_ALLOC (what insmod actually maps into
+# module memory) is ~21 KiB / ~17 KiB / ~1.08 MiB and is comparable to the stock
+# 32-bit modules (19 KiB / 13 KiB / 941 KiB). So the 57 MiB is a shipping and
+# adb-push cost, never a reason insmod could fail.
+#
+# `-g` (--strip-debug) removes ONLY debug sections; .symtab, .modinfo,
+# __versions and .rela.* all survive, which the modinfo dump below re-verifies
+# on the stripped files. A strip that damaged a module therefore fails the build
+# here instead of reaching the device.
+STRIP="${CROSS_COMPILE}strip"
+if command -v "$STRIP" >/dev/null 2>&1; then
+  echo "=== strip -g (debug info only, as INSTALL_MOD_STRIP=1 does) ==="
+  _tot_a=0; _tot_b=0
+  for _m in "$OUTDIR"/*.ko; do
+    _a=$(stat -c %s "$_m" 2>/dev/null || wc -c < "$_m")
+    "$STRIP" -g "$_m" || { echo "ERROR: strip failed on $_m"; exit 1; }
+    _b=$(stat -c %s "$_m" 2>/dev/null || wc -c < "$_m")
+    _tot_a=$((_tot_a + _a)); _tot_b=$((_tot_b + _b))
+    echo "   $(basename "$_m"): $_a -> $_b bytes"
+    # A strip that silently did nothing would leave the artifact bloated while
+    # every other check still passed -- so say so loudly.
+    [ "$_b" -lt "$_a" ] || echo "   WARN: strip did not shrink $(basename "$_m")"
+  done
+  echo "   total: $_tot_a -> $_tot_b bytes"
+else
+  echo "NOTE: $STRIP not found -- shipping UNSTRIPPED modules (much larger .ko);"
+  echo "      install binutils-aarch64-linux-gnu to shrink the artifact"
+fi
+
+echo "=== built (shipped) connectivity modules ==="
 ls -l "$OUTDIR"/*.ko 2>/dev/null || { echo "ERROR: no modules produced"; exit 1; }
 
 # Hard assertion: the artifact must contain all four modules. Without this the
@@ -613,12 +667,6 @@ if [ -n "$_missing" ]; then
   exit 1
 fi
 echo "   OK: all 4 connectivity modules present."
-
-# Relocation profile of every shipped module (see report_relocs).
-echo "=== relocation profile ==="
-for m in "$OUTDIR"/*.ko; do
-  report_relocs "$m"
-done
 
 # Hard gate for the ONLY thing that makes those modules loadable: the target
 # kernel must carry the ADRP relocation fix from step 2e. Shipping .ko files that
