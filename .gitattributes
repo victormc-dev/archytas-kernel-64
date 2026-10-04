@@ -1,3 +1,9 @@
+# Everything else: normalise CRLF away in the repo, keep the working copy as-is.
+# NOTE: in .gitattributes the LAST matching pattern wins, so the broad rule must
+# come first and the specific ones after it -- otherwise `* text=auto` would
+# silently cancel the eol=lf pins below.
+* text=auto
+
 # Shell scripts, Python and CI definitions run on Linux (GitHub Actions).
 # core.autocrlf is true in this working copy, so pin LF explicitly: a CRLF
 # port/build_connectivity_modules.sh fails on the runner with
@@ -6,6 +12,3 @@
 *.py    text eol=lf
 *.yml   text eol=lf
 *.yaml  text eol=lf
-
-# Everything else: normalise CRLF away in the repo, keep the working copy as-is.
-* text=auto
