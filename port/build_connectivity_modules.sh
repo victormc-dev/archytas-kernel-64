@@ -220,7 +220,19 @@ build_mod() {
 build_mod common  CONFIG_MTK_COMBO_CHIP=CONSYS_6761
 build_mod wlan/adaptor CONFIG_MTK_COMBO_CHIP=CONSYS_6761
 build_mod bt      CONFIG_MTK_COMBO_CHIP=CONSYS_6761
+# MTK_ANDROID_WMT=y is REQUIRED here. This SoC uses the legacy WMT glue, not
+# conninfra, so CFG_SUPPORT_CONNINFRA is forced to 0. But gl_rst.c/axi.c compile
+# their WMT code whenever CFG_SUPPORT_CONNINFRA==0 (NOT additionally gated on
+# CFG_MTK_ANDROID_WMT), while the header that declares those symbols is included
+# only under `#if CFG_MTK_ANDROID_WMT && (CFG_SUPPORT_CONNINFRA == 0)` (gl_rst.h)
+# -> without it: CFG_MTK_ANDROID_WMT==0, wmt_exp.h never included, yet
+# gl_rst.c still references WMTDRV_TYPE_WIFI / mtk_wcn_wmt_msgcb_reg /
+# mtk_wcn_wmt_assert_timeout / WMTMSG_TYPE_RESET / WMTRSTMSG_* -> undeclared.
+# Setting MTK_ANDROID_WMT=y also makes the wlan Makefile emit
+# -I.../common/common_main/include and .../common_main/linux/include, which is
+# where wmt_exp.h (and its deps osal.h/wmt_plat.h/stp_exp.h) live.
 build_mod wlan    MTK_COMBO_CHIP=MT6761 \
+                    MTK_ANDROID_WMT=y \
                     CONFIG_MTK_COMBO_WIFI_HIF=axi \
                     CONFIG_MTK_COMBO_WIFI=m \
                     CONFIG_WLAN_DRV_BUILD_IN=n
