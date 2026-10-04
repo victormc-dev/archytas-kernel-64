@@ -76,9 +76,21 @@ fetch_repo() {
       local api="${url%.git}"
       api="${api#https://github.com/}"
       api="https://api.github.com/repos/${api}/commits/${commit}"
-      local api_sha
-      api_sha="$(curl -fsSL "$api" 2>/dev/null \
-                 | sed -n 's/^ *"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)"
+      local api_sha=""
+      # MUST NOT be able to abort the build. This runs under `set -e` +
+      # `set -o pipefail`, so `curl -f` returning exit 22 (HTTP >=400, e.g. the
+      # unauthenticated GitHub API rate limit) propagated straight out of the
+      # script and killed CI build #14 before the FULLSHA fallback below could
+      # run. Use a non-fatal curl (no -f) with a timeout, and swallow any
+      # residual failure so an unreachable/limited API just falls through to
+      # the pinned table.
+      api_sha="$(curl -sSL --max-time 20 "$api" 2>/dev/null \
+                 | sed -n 's/^ *"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)" || api_sha=""
+      if [ -n "$api_sha" ]; then
+        echo "   api: $commit -> $api_sha"
+      else
+        echo "   api lookup returned nothing for $commit (rate limit/offline?); using pinned table"
+      fi
       [ -n "$api_sha" ] && full="$api_sha"
     fi
     [ "$full" = "$commit" ] && [ -n "${FULLSHA[$commit]:-}" ] && full="${FULLSHA[$commit]}"
