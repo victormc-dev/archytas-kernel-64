@@ -65,6 +65,22 @@ def main() -> None:
     gzip_part = tpl[PAGE:PAGE + off4g]      # kernel gzip, before the 4G DTB
     new_region = gzip_part + wifi           # kernel gzip + Wi-Fi DTB
 
+    # The template is exactly 32 MiB and its kernel region is exactly as long as
+    # the gzip plus the 4G DTB, so a board DTB larger than the template's cannot
+    # fit. Without this guard the bytearray slice assignment below silently
+    # *grows* the image instead of failing, and the failure only surfaces one
+    # step later inside package_archimedes_boot.py as the misleading
+    # "template must be an exact 32 MiB Android boot image".
+    if len(new_region) > ks:
+        raise ValueError(
+            "board DTB is %d bytes but the template's DTB is %d: the repacked "
+            "kernel region would be %d bytes (limit %d), i.e. a %d-byte image "
+            "instead of %d. Shrink the DTB (see port/patch_wifi_dtb.py: reuse the "
+            "original strings block and do not pad the blob), or supply a "
+            "template with more slack."
+            % (len(wifi), size4g, len(new_region), ks,
+               PAGE + len(new_region) + (len(tpl) - PAGE - ks), BOOT_SIZE))
+
     out = bytearray(BOOT_SIZE)
     out[:PAGE] = tpl[:PAGE]                 # MTK v1 header + cmdline + addrs
     out[PAGE:PAGE + len(new_region)] = new_region
@@ -73,6 +89,8 @@ def main() -> None:
     tail = tpl[PAGE + ks:]
     out[PAGE + len(new_region):PAGE + len(new_region) + len(tail)] = tail
     struct.pack_into("<I", out, 8, len(new_region))
+    assert len(out) == BOOT_SIZE, (
+        "repacked image is %d bytes, expected %d" % (len(out), BOOT_SIZE))
 
     # Self-check: re-extract the DTB the packager will see.
     noff, nsize = trailing_fdt(out[PAGE:PAGE + len(new_region)])

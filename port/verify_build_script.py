@@ -511,8 +511,30 @@ else:
             check("matches 4g_stock.dtb on /%s" % "/".join(_p),
                   sorted(_a.props) == sorted(_b.props),
                   "patched=%r ref=%r" % (sorted(_a.props), sorted(_b.props)))
+        # Size parity is load-bearing, not cosmetic: the 32 MiB boot template has
+        # no slack, so a DTB even 2 bytes larger makes make_wifi_template.py emit a
+        # 32 MiB + N image and package_archimedes_boot.py then dies with the
+        # misleading "template must be an exact 32 MiB Android boot image".
+        # That is exactly how run #37195577635 failed (33554542-byte template),
+        # after the emitter rebuilt the strings block (+123 B) and padded the blob
+        # (+2 B) instead of reusing the original strings block and emitting an
+        # unpadded blob.
+        _ref_len = DTB_REF.stat().st_size
+        check("patched DTB is no larger than the template's DTB", len(_out) <= _ref_len,
+              "patched=%d ref=%d" % (len(_out), _ref_len))
+        check("...in fact exactly the same size", len(_out) == _ref_len,
+              "patched=%d ref=%d" % (len(_out), _ref_len))
     else:
         print("   SKIP 4g_stock.dtb comparison (reference DTB missing)")
+
+# The packager must fail loudly instead of silently growing the image: a bytearray
+# slice assignment past the end EXTENDS it, so the 32 MiB invariant is lost without
+# any error at the point of the mistake.
+_tpl_py = (ROOT / "port" / "make_wifi_template.py").read_text(encoding="utf-8")
+check("make_wifi_template.py guards against an oversized DTB",
+      "board DTB is" in _tpl_py and "len(new_region) > ks" in _tpl_py)
+check("make_wifi_template.py asserts the 32 MiB invariant",
+      "repacked image is" in _tpl_py)
 
 # The workflow must patch the DTB and package the patched one.
 _wf = WORKFLOW.read_text(encoding="utf-8") if WORKFLOW.exists() else ""

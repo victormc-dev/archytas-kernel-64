@@ -761,6 +761,38 @@ wifi@18000000 { compatible="mediatek,wifi"; memory-region = <0xa8>; ... };
 **只剩两个充电电流值**，即结构上与厂商修好的那份完全等价，而板级参数仍是 WiFi 版的。
 `aw87329_pa`（`make_wifi_template.py` 的自检锚点）保留 4 处。
 
+#### 坑：DTB 尺寸 vs 32 MiB 模板（第一次跑 CI 就炸了）
+
+`make_wifi_template.py` 把内核区改成 `gzip + 新DTB`，再把原内核区之后的内容（ramdisk+padding）
+原样接在后面。**模板正好塞满 32 MiB**，所以新 DTB 一旦比模板里的旧 DTB 大，字节数就溢出。
+而 Python 的 `bytearray` **切片赋值越界不会报错，而是自动扩容**：
+
+```
+output=wifi-template-32MiB.img size=33554542      ← 应为 33554432
+wifi_dtb_size=84204
+ValueError: template must be an exact 32 MiB Android boot image   ← 报错发生在下一步，误导
+```
+
+第一版修补器输出 **84204 字节**，比模板里的 84094 大 110。两个原因，都很隐蔽：
+
+| | size_struct | size_str | 合计 |
+|---|---|---|---|
+| `wifi_stock.dtb`（原始）| 74400 | 9576 | 84032 |
+| `4g_stock.dtb`（厂商修好版）| 74448 | 9590 | **84094** |
+| 第一版输出 ❌ | 74448 | **9699** | **84204** |
+| 修正后 ✅ | 74448 | 9590 | **84094** |
+
+1. **字符串块被整体重建**：正确做法是**保留原字符串块、只把新名字追加在末尾**（原有属性的
+   `nameoff` 全部不变）。重建会凭空多出 123 字节。
+2. **别给 DTB 末尾补对齐**：厂商那份 `totalsize=84094`（`%4==2`），本来就不对齐；补 2 字节反而溢出。
+
+注意 `shared-dma-pool` 是属性**值**（在 struct 块里、属于 `compatible` 的内容），**不占字符串表**；
+字符串表只需要新增 `memory-region`（14 字节）—— 这也正是"修好后尺寸与厂商版完全相同"的原因。
+
+修正后：`make_wifi_template.py` 输出**正好 33554432**；并加了显式护栏（`len(new_region) > ks`
+直接抛带具体字节数的错）+ 32 MiB 断言，避免以后再出现"报错点与病根不在同一处"。
+`verify_build_script.py` 第 10 组也加了尺寸相等断言（`patched=84094 ref=84094`，含反向对照）。
+
 #### CI 接线
 
 `build.yml` 在 "Package boot images" 之前新增一步

@@ -171,6 +171,9 @@ class Fdt:
             )
         self.strings = blob[self.off_strings:self.off_strings + self.size_strings]
         self.rsvmap = blob[self.off_rsvmap:self.off_struct]
+        # Property-name -> offset inside the original strings block. Kept so
+        # tobytes() can reuse the block verbatim instead of rebuilding it.
+        self.name_offsets: dict[str, int] = {}
         self.root = self._parse()
 
     def _str(self, off: int) -> str:
@@ -212,7 +215,9 @@ class Fdt:
                 pos = pad4(pos + ln)
                 if not stack:
                     raise ValueError("property outside a node")
-                stack[-1].props.append((self._str(nameoff), val))
+                nm = self._str(nameoff)
+                self.name_offsets.setdefault(nm, nameoff)
+                stack[-1].props.append((nm, val))
             elif tok == FDT_NOP:
                 pass
             elif tok == FDT_END:
@@ -240,8 +245,21 @@ class Fdt:
         out += p32(FDT_END_NODE)
 
     def tobytes(self) -> bytes:
-        strmap: dict[str, int] = {}
-        strout = bytearray()
+        # Reuse the original strings block verbatim and only append names that are
+        # not already in it.  Rebuilding the block from scratch yields a larger one
+        # than dtc's (which is tight), and the Archytas 32 MiB boot template has no
+        # slack: a DTB even 110 bytes too big makes make_wifi_template.py emit a
+        # 32 MiB + N image, and package_archimedes_boot.py then aborts with
+        # "template must be an exact 32 MiB Android boot image".
+        #
+        # Note "shared-dma-pool" does NOT need a strings entry -- it is a property
+        # *value* (it lives in the struct block inside the compatible property).
+        # The only new property *name* is "memory-region" (+14 bytes), which is why
+        # the result is exactly as large as the vendor's fixed-up 4G DTB (84094).
+        strout = bytearray(self.strings)
+        if strout and strout[-1] != 0:
+            strout += b"\x00"
+        strmap: dict[str, int] = dict(self.name_offsets)
         struct_out = bytearray()
         self._emit(self.root, struct_out, strmap, strout)
         struct_out += p32(FDT_END)
@@ -259,8 +277,10 @@ class Fdt:
             out += b"\x00"
         off_strings = len(out)
         out += strout
-        while len(out) % 4:
-            out += b"\x00"
+        # Deliberately NO trailing pad: the vendor's own fixed-up DTB is 84094
+        # bytes (2 mod 4), so dtc/TheKit do not pad the blob either. Padding here
+        # would push the total 2 bytes over the template's DTB and grow the boot
+        # image past 32 MiB.
 
         struct.pack_into(
             ">IIIIIIIII",

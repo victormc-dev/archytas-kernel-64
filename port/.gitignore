@@ -3,3 +3,6 @@
 
 # 真机 adb pull 回来的模块临时目录（验证用，不入库）
 _devko/
+
+# 由 patch_wifi_dtb.py 从 wifi_stock.dtb 生成（CI 与本地都会现做），不入库
+wifi_archytas.dtb
