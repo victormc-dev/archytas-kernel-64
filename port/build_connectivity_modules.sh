@@ -141,6 +141,57 @@ find "$KROOT/$CONN" -type f \( -name 'Makefile' -o -name 'Kbuild' -o -name '*.mk
       sed -i -E 's/-Werror=[A-Za-z0-9_+-]+//g; s/-Werror([[:space:]]|$)/ /g' "$m"
     done
 
+# ---- 2c. ARCHYTAS EMI/MPU protection compat shim ------------------------
+# The Gen4M WLAN module (gl_init.c, axi.c) references gConEmiPhyBaseFinal /
+# gConEmiSizeFinal and kalSetEmiMpuProtection() (and kalSetDrvEmiMpuProtection()
+# on the non-prealloc path). On this 4.9 tree those are NOT provided: the MTK
+# HAL that defines them is absent, and the Wi-Fi reserved-memory EMI window is
+# owned by the bootloader/conninfra. agui's 0001 patch adds plat_priv.c with the
+# definitions but never wires it into the module -objs, so it is never compiled,
+# and gConEmi*Final is declared upstream only under #if CFG_MTK_ANDROID_EMI
+# (which is OFF in this build) -> 'undeclared' / implicit-function errors.
+#
+# Fix: (a) extend the ALREADY-linked compat_stub.c with the missing symbols, and
+# (b) force-include a header that declares them into every WLAN translation unit,
+# so both gl_init.c and axi.c see the prototypes regardless of which branch is
+# compiled. The functions are intentionally no-ops: the EMI MPU policy is owned
+# by the bootloader/conninfra on this device (see agui's comment in axi.c).
+cat > "$WLAN_DIR/emi_compat.h" <<'EOF'
+#ifndef ARCHYTAS_EMI_COMPAT_H
+#define ARCHYTAS_EMI_COMPAT_H
+#include <linux/types.h>
+extern phys_addr_t gConEmiPhyBaseFinal;
+extern unsigned long long gConEmiSizeFinal;
+extern void kalSetEmiMpuProtection(phys_addr_t emiPhyBase, bool enable);
+extern void kalSetDrvEmiMpuProtection(phys_addr_t emiPhyBase, uint32_t offset, uint32_t size);
+#endif
+EOF
+
+cat >> "$WLAN_DIR/compat_stub.c" <<'EOF'
+
+/* ARCHYTAS EMI/MPU compat shim -- see emi_compat.h.
+ * The kernel tree on this 4.9 device does not provide kalSetEmiMpuProtection
+ * (it lives behind a MTK HAL that is absent); the Wi-Fi reserved-memory EMI
+ * window is protected by the bootloader/conninfra, so these are no-ops. */
+phys_addr_t gConEmiPhyBaseFinal;
+unsigned long long gConEmiSizeFinal;
+void kalSetEmiMpuProtection(phys_addr_t emiPhyBase, bool enable)
+{
+}
+void kalSetDrvEmiMpuProtection(phys_addr_t emiPhyBase, uint32_t offset, uint32_t size)
+{
+}
+EOF
+
+# Force-include emi_compat.h into every WLAN TU. Anchor on the -Wno-error line
+# that agui's 0001 patch already inserted into the module Makefile.
+if grep -q 'ccflags-y += -Wno-error' "$WLAN_DIR/Makefile"; then
+  sed -i "s|^ccflags-y += -Wno-error|ccflags-y += -Wno-error\nccflags-y += -include $WLAN_DIR/emi_compat.h|" "$WLAN_DIR/Makefile"
+  echo "   force-include emi_compat.h added to wlan Makefile"
+else
+  echo "WARN: -Wno-error anchor not found in wlan Makefile; emi_compat.h NOT force-included"
+fi
+
 # ---- 3. Prepare generated headers / vmlinux symtab for out-of-tree modpost
 echo ">> modules_prepare"
 make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
@@ -154,9 +205,13 @@ make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
 build_mod() {
   local d="$1"; shift
   echo ">> build module: $CONN/$d"
+  # Force-include the ARCHYTAS EMI/MPU compat header (created in step 2c) into
+  # every translation unit. KCFLAGS is the most reliable vehicle because it is
+  # folded into KBUILD_CFLAGS for all module compiles regardless of how the
+  # module's -objs are laid out across subdirectories.
   make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
        HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" \
-       KCFLAGS="-Wno-error" \
+       KCFLAGS="-Wno-error -include $WLAN_DIR/emi_compat.h" \
        AUTOCONF_H="$AUTOCONF" KERNEL_OUT="$KOUT" TOP="$KROOT" \
        KBUILD_MODPOST_FAIL_ON_WARNINGS= \
        M="$CONN/$d" "$@" modules -j"$JOBS"
