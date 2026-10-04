@@ -8,6 +8,10 @@ archimedes-kernel-64-main/
 柴提全原无数据4G_9.1864/
 柴提全原无数据WiFi.9.1638/
 
+# 本地刷机产物：CI 下回来的 artifact / 32MiB boot 镜像（体积大，可由 CI 重新生成）
+archytas-wifi-boot/
+archytas-wifi-boot-and-modules/
+
 # 工作区元数据
 .workbuddy/
 
