@@ -91,11 +91,29 @@ FDT_END = 9
 
 WIFI_NODE = "wifi@18000000"
 WIFI_RMEM_NODE = "wifi-reserve-memory"
+CONSYS_RMEM_NODE = "consys-reserve-memory"
 RESERVED_MEMORY_NODE = "reserved-memory"
 
 WIFI_RMEM_BASE = 0x7F000000
 WIFI_RMEM_SIZE = 0x300000
 WIFI_RMEM_COMPAT = b"shared-dma-pool\x00mediatek,wifi-reserve-memory\x00"
+
+# CONSYS EMI window -- where the bootloader/LK and WMT STP firmware expect
+# the 4 MB shared-memory mailbox.  Observed live from WMT boot log:
+# "Clearing Connsys EMI physical(0xbf000000) 4194304 bytes".
+# The DT's original consys-reserve-memory uses alloc-ranges (dynamic), so
+# the kernel's reserved-memory allocator picks some address inside
+# 0x40000000..0xC0000000 -- which DOES NOT match the hard-coded window the
+# WMT driver programs into the CONSYS chip.  Result: STP share-memory
+# structs end up at two different physical addresses -> gRxCount = -1
+# garbage -> HOST_AWAKE/ FW_START handshake timeouts -> wlan never appears.
+# Fix: pin it to the same 0xbf000000 window the bootloader and WMT use.
+# The size change is ZERO: swap alloc-ranges (16 bytes of struct value) for
+# reg (16 bytes of struct value); both property names are already in the
+# original strings block, so totalsize stays 84094.
+CONSYS_RMEM_BASE = 0xBF000000
+CONSYS_RMEM_SIZE = 0x400000
+CONSYS_RMEM_COMPAT = b"mediatek,consys-reserve-memory\x00"
 
 
 def u32be(buf: bytes, off: int) -> int:
@@ -335,44 +353,79 @@ def patch(dtb: bytes) -> tuple[bytes, bool]:
     if wifi is None:
         raise ValueError("no %s node at root" % WIFI_NODE)
 
-    # Already patched?
+    changed = False
+
+    # Already patched?  (Checks both wifi- and consys-reserve-memory so the
+    # function is idempotent when run on an already-fully-patched blob.)
     want_reg = struct.pack(">IIII", 0, WIFI_RMEM_BASE, 0, WIFI_RMEM_SIZE)
-    if (
+    wifi_already_patched = (
         node.get("compatible") == WIFI_RMEM_COMPAT
         and node.get("reg") == want_reg
         and node.get("phandle")
         and wifi.get("memory-region") == node.get("phandle")
-    ):
-        return dtb, False
+    )
 
-    ph = node.get("phandle") or node.get("linux,phandle")
-    if ph and len(ph) >= 4:
-        phandle = struct.unpack_from(">I", ph, 0)[0]
-    else:
-        phandle = next_free_phandle(fdt.root)
-    phval = p32(phandle)
+    if not wifi_already_patched:
+        changed = True
+        ph = node.get("phandle") or node.get("linux,phandle")
+        if ph and len(ph) >= 4:
+            phandle = struct.unpack_from(">I", ph, 0)[0]
+        else:
+            phandle = next_free_phandle(fdt.root)
+        phval = p32(phandle)
 
-    # reserved-memory/wifi-reserve-memory -> coherent DMA pool, fixed window.
-    # "no-map" is deliberately KEPT: it is what makes rmem_cma_setup() bail out
-    # and rmem_dma_setup() take over (see module docstring).
-    node.drop("alloc-ranges", "compatible", "phandle", "linux,phandle")
-    node.set("compatible", WIFI_RMEM_COMPAT)
-    node.set("reg", want_reg)
-    node.set("phandle", phval)
+        # reserved-memory/wifi-reserve-memory -> coherent DMA pool, fixed window.
+        # "no-map" is deliberately KEPT: it is what makes rmem_cma_setup() bail out
+        # and rmem_dma_setup() take over (see module docstring).
+        node.drop("alloc-ranges", "compatible", "phandle", "linux,phandle")
+        node.set("compatible", WIFI_RMEM_COMPAT)
+        node.set("reg", want_reg)
+        node.set("phandle", phval)
 
-    # Cosmetic: mirror the property order used by the vendor 4G DTB so the
-    # dumped result diffs cleanly against 4g_stock.dtb.
+        # Cosmetic: mirror the property order used by the vendor 4G DTB so the
+        # dumped result diffs cleanly against 4g_stock.dtb.
+        order = ["phandle", "reg", "compatible", "no-map", "size", "alignment"]
+        rank = {n: i for i, n in enumerate(order)}
+        node.props.sort(key=lambda kv: rank.get(kv[0], len(order)))
+
+        # wifi@18000000 -> bind the pool
+        wifi.set("memory-region", phval)
+        wifi_order = ["memory-region", "compatible", "reg", "interrupts"]
+        wrank = {n: i for i, n in enumerate(wifi_order)}
+        wifi.props.sort(key=lambda kv: wrank.get(kv[0], len(wifi_order)))
+
+    # ---- CONSYS EMI window (shared memory for WMT STP) ------------------
+    # Pin consys-reserve-memory to the same 0xbf000000 that the bootloader
+    # and WMT STP firmware expect.  Without this the kernel's dynamic allocator
+    # picks a different address inside 0x40000000..0xC0000000, the WMT driver
+    # programs the CONSYS chip's EMI window to 0xbf000000 anyway, and the two
+    # sides never agree on where the STP mailbox lives -> gRxCount=-1 and
+    # every HOST_AWAKE / FW_START handshake times out.
+    consys = rmem_parent.child(CONSYS_RMEM_NODE)
+    if consys is None:
+        for c in rmem_parent.children:
+            if c.name.split("@")[0] == CONSYS_RMEM_NODE:
+                consys = c
+                break
+    if consys is None:
+        raise ValueError("no consys-reserve-memory node under /reserved-memory")
+
+    # Property order for cosmetic mirroring (also used by consys).
     order = ["phandle", "reg", "compatible", "no-map", "size", "alignment"]
     rank = {n: i for i, n in enumerate(order)}
-    node.props.sort(key=lambda kv: rank.get(kv[0], len(order)))
 
-    # wifi@18000000 -> bind the pool
-    wifi.set("memory-region", phval)
-    wifi_order = ["memory-region", "compatible", "reg", "interrupts"]
-    wrank = {n: i for i, n in enumerate(wifi_order)}
-    wifi.props.sort(key=lambda kv: wrank.get(kv[0], len(wifi_order)))
+    consys_want_reg = struct.pack(">IIII", 0, CONSYS_RMEM_BASE, 0, CONSYS_RMEM_SIZE)
+    consys_already_patched = (
+        consys.get("reg") == consys_want_reg
+        and consys.get("alloc-ranges") is None
+    )
+    if not consys_already_patched:
+        consys.drop("alloc-ranges")
+        consys.set("reg", consys_want_reg)
+        consys.props.sort(key=lambda kv: rank.get(kv[0], len(order)))
+        changed = True
 
-    return fdt.tobytes(), True
+    return fdt.tobytes(), changed
 
 
 def main() -> None:
@@ -392,12 +445,18 @@ def main() -> None:
 
     # Re-parse to prove the result is a well-formed FDT with the right nodes.
     check = Fdt(out)
-    rm = find_path(check.root, RESERVED_MEMORY_NODE).child(WIFI_RMEM_NODE)
+    rmem_root = find_path(check.root, RESERVED_MEMORY_NODE)
+    rm = rmem_root.child(WIFI_RMEM_NODE)
     wf = check.root.child(WIFI_NODE)
-    assert rm.get("compatible") == WIFI_RMEM_COMPAT, "compatible not applied"
-    assert rm.get("reg") == struct.pack(">IIII", 0, WIFI_RMEM_BASE, 0, WIFI_RMEM_SIZE), "reg not applied"
-    assert wf.get("memory-region") == rm.get("phandle"), "memory-region not linked"
+    assert rm.get("compatible") == WIFI_RMEM_COMPAT, "wifi compatible not applied"
+    assert rm.get("reg") == struct.pack(">IIII", 0, WIFI_RMEM_BASE, 0, WIFI_RMEM_SIZE), "wifi reg not applied"
+    assert wf.get("memory-region") == rm.get("phandle"), "wifi memory-region not linked"
     assert rm.get("phandle") is not None
+    cs = rmem_root.child(CONSYS_RMEM_NODE)
+    assert cs is not None, "consys-reserve-memory missing"
+    assert cs.get("reg") == struct.pack(">IIII", 0, CONSYS_RMEM_BASE, 0, CONSYS_RMEM_SIZE), "consys reg not applied"
+    assert cs.get("alloc-ranges") is None, "consys alloc-ranges should have been dropped"
+    assert cs.get("compatible") == CONSYS_RMEM_COMPAT, "consys compatible wrong"
 
     print("changed=%s" % changed)
     print("in  size=%d sha256=%s" % (len(src), hashlib.sha256(src).hexdigest()))
@@ -407,6 +466,8 @@ def main() -> None:
              rm.get("reg").hex(),
              rm.get("phandle").hex()))
     print("wifi@18000000: memory-region=%r" % wf.get("memory-region").hex())
+    print("consys-reserve-memory: compatible=%r reg=%r"
+          % (cs.get("compatible"), cs.get("reg").hex()))
 
 
 if __name__ == "__main__":

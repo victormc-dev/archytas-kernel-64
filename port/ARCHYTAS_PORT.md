@@ -18,6 +18,12 @@
 指向 `.text` 函数内字面量池的 ADRP。真正原因在 `arch/arm64/kernel/module.c` 的
 `#ifndef CONFIG_ARM64_ERRATUM_843419` 守卫，已按第 8.3 节手术式修复。
 
+**2026-10-04 深夜追加（见第 9.11 节）**：Wi-Fi 模块加载三连胜但 `wlan0` 永不出现，
+FW_START 握手超时 + `gRxCount=-1` 垃圾值。根因：`consys-reserve-memory` 用 `alloc-ranges`
+动态分配地址，而 bootloader/WMT 硬编码 CONSYS EMI 窗口在 `0xbf000000` → STP 共享内存
+两侧地址不匹配。修法：`patch_wifi_dtb.py` 扩展（零尺寸增长），把 `alloc-ranges` 换成固定
+`reg = <0x0 0xbf000000 0x0 0x400000>`。
+
 ---
 
 ## 1. 核心结论（原厂对原厂，权威）
@@ -963,6 +969,110 @@ if (u4Status != WLAN_STATUS_SUCCESS) {
 
 `workflow_dispatch`（快车道）与 `pull_request` **故意不过滤** —— 快车道要能手动随时跑，
 PR 应当始终被验证。
+
+### 9.11 第四个根因（DTB consys-reserve-memory 动态分配 vs bootloader 固定窗口）✅ 已修（2026-10-04 深夜）
+
+**现象回顾**：前三个根因修完后，`wmt_drv` / `wmt_chrdev_wifi` / `wlan_drv_gen4m` 三模块 `insmod rc=0`，AXI probe 成功返回 0，固件下载成功（`kalFirmwareOpen: WIFI_RAM_CODE_soc1_0_1_1.bin done`），**但 FW_START 握手超时 → 整芯片复位循环 → wlan0 永不出现**。
+
+关键异常（9.9 节日志）：
+```
+Clearing Connsys EMI physical(0xbf000000) 4194304 bytes   ← WMT 日志里的固定 4MB 清零
+[HIF-SDIO][E] wmt_lib_put_act_op: opId(20) completion timeout
+[HIF-SDIO][E] wmt_dev_rx_timeout: gRxCount != 0 (-1)       ← STP 接收计数垃圾值
+[WMT-CORE][E] opfunc_pwr_sv: read HOST_AWAKE_EVT fail(-1)  ← WMT 握手也失败
+```
+
+#### 根因：`consys-reserve-memory` 的 `alloc-ranges` 与 bootloader 硬编码窗口不匹配
+
+**DT 现状**（`wifi_stock.dtb` + `4g_oem_boot.dtb`，两份完全相同）：
+```
+consys-reserve-memory {
+    compatible = "mediatek,consys-reserve-memory";
+    no-map;
+    size = <0x0 0x400000>;
+    alignment = <0x0 0x1000000>;
+    alloc-ranges = <0x0 0x40000000 0x0 0x80000000>;   ← 动态分配
+};
+```
+
+**没有** `reg` 属性 → reserved-memory 分配器在 `0x40000000..0xC0000000` 内动态选地址。
+
+**WMT / bootloader 那边**：日志里明确打印 `0xbf000000` —— bootloader/LK 和 WMT 驱动**硬编码** CONSYS EMI 窗口在这个固定地址。它们不读 DT，直接把 CONSYS 芯片的 EMI window 基寄存器编程为 `0xbf000000`。
+
+**冲突**：
+```
+内核 gConEmiPhyBase     = DT 动态分配（X，某个 0x40000000..0xC0000000 内的值）
+WMT / 芯片 EMI window    = 0xbf000000（硬编码）
+```
+
+两边对**同一个 4MB 共享内存**的物理地址理解不一致 → STP（Share Transport Protocol）的接收/发送结构体在 host 侧和 chip 侧各在不同位置 → 芯片写入 STP 头部的数据 host 永远读不到 → `gRxCount = -1`（0xffffffff）垃圾值 → 所有握手（HOST_AWAKE、FW_START）超时 → 芯片复位循环。
+
+**为什么 4G 原厂内核能工作**：原厂 32 位内核 + 原厂 WMT 驱动的代码路径里，`gConEmiPhyBase` 可能也来自动态分配，但原厂内核可能通过别的机制（atag、bootloader 传参、或驱动里的 fallback）同步了地址。而我们的 64 位 archimedes 内核的 `connectivity_build_in_adapter.c`（`RESERVEDMEM_OF_DECLARE`）**只读 DT**，没有 atag fallback。
+
+**关键证据链**：
+1. `gl_init.c:5335` 赋值 `gConEmiPhyBaseFinal = gConEmiPhyBase;`（内核导出的 DT 分配值）
+2. 固件下载走 AXI 窗口（直接 MMIO 到芯片 RAM，不依赖共享内存）→ 成功
+3. STP / FW_START 握手需要共享内存 → 两边地址不匹配 → 超时
+4. DTB diff（§1）显示 4G vs Wi-Fi 在 consys/wmt 节点上零差异 → 问题不在 DTBO/overlay
+5. 4G 原厂更新版 DTB（`4g_stock.dtb`）里 `consys-reserve-memory` **也没有** `reg` —— 厂商只修了 wifi-reserve-memory（§9.7），没动 consys，说明原厂内核有 fallback 而我们没有
+
+#### 修法：`patch_wifi_dtb.py` 扩展（零尺寸增长！）
+
+`alloc-ranges`（16 字节 struct value）→ `reg`（16 字节 struct value），struct 块大小不变。字符串表完全不变：`reg` 已存在于原始块里（wifi-reserve-memory 已引用），`alloc-ranges` 虽不再被引用但整块保留不重建。**总 DTB 尺寸仍为 84094，与 4g_stock.dtb 相同**。
+
+```
+consys-reserve-memory {
+    reg = <0x0 0xbf000000 0x0 0x400000>;       ← 新增，与 bootloader/WMT 对齐
+    compatible = "mediatek,consys-reserve-memory";
+    no-map;
+    size = <0x0 0x400000>;
+    alignment = <0x0 0x1000000>;
+    // alloc-ranges 删除
+};
+```
+
+**`0xbf000000` 不与任何保留区冲突**：
+```
+mblock-9-SPM-reserved    0x77ff0000 .. 0x78000000
+wifi-reserve-memory(已修) 0x7f000000 .. 0x7f300000
+mblock-7-framebuffer     0x7f980000 .. 0x7feb0000
+mblock-6-SSPM-reserved   0x7feb0000 .. 0x7ffb0000
+mblock-3-log_store       0x7ffbf000 .. 0x7ffff000
+CONSYS EMI window (本次)  0xbf000000 .. 0xbf400000    ← DRAM 内、无冲突
+DRAM 上限                0xC0000000
+```
+
+端到端验证（`patch_wifi_dtb.py` → `make_wifi_template.py --wifi-dtb`）：输出精确 **33554432 字节（32 MiB）**，kernel_region 尺寸不变。
+
+幂等性验证：对已补丁 blob 再跑一遍 → `changed=False`、sha256 完全相同。
+
+#### CI 自动接线
+
+`patch_wifi_dtb.py` 已被 `.github/workflows/build.yml` 的 "Patch the Wi-Fi DTB" 步骤调用（§9.8），`make_wifi_template.py` 在两个 stage 都消费该产物。**改动只在 `patch_wifi_dtb.py` 内部**，CI yaml 无需变动。
+
+⚠️ **副作用**：改的是 DTB → 必须重新刷 boot 镜像（不像前两个模块根因只改 `.ko`）。
+
+#### 真机确认命令（若需进一步诊断）
+
+如果刷入补丁 boot 后仍有 STP 问题，在设备上跑：
+```sh
+# 1. 确认 DT 里 consys-reserve-memory 现在有固定 reg
+for f in /proc/device-tree/reserved-memory/consys-reserve-memory/*; do \
+  echo -n "$(basename $f)="; xxd -p $f | head -1; done
+
+# 2. 内核实际看到的 CONSYS EMI 基地址
+adb shell 'cat /proc/kallsyms | grep gConEmiPhyBase'
+adb shell 'echo gConEmiPhyBase | busybox nc -p /proc/kallsyms'  # 或直接从 dmesg 看
+
+# 3. /proc/interrupts 里 conn2ap_sw_irq (242) 是否有计数
+adb shell 'grep -E "242|conn2ap" /proc/interrupts'
+
+# 4. 系统 DRAM 布局（确认 0xbf000000 在 RAM 内）
+adb shell 'cat /proc/iomem | head -20'
+adb shell 'ls /sys/firmware/devicetree/base/reserved-memory/'
+```
+
+### 9.10 CI 触发过滤：不该编的推送就别编（2026-10-04）
 
 ---
 

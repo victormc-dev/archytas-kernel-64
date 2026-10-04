@@ -485,6 +485,38 @@ else:
           (_pw_rm.get("phandle") or b"").hex())
     check("idempotent (second run is a no-op)",
           _pw.patch(_out) == (_out, False))
+
+    # ---- consys-reserve-memory: same fix, different root cause -----------
+    # The stock DTB also leaves this node with alloc-ranges (dynamic), so the
+    # kernel's reserved-memory allocator picks some address in 0x40000000..
+    # 0xC0000000.  WMT/bootloader, however, hard-code the CONSYS EMI STP
+    # mailbox at 0xbf000000.  Two sides, two addresses -> gRxCount = -1 on
+    # every STP packet -> HOST_AWAKE / FW_START handshake timeouts -> wlan0
+    # never appears.  The fix pins it to 0xbf000000 (4 MiB, no overlap with
+    # any bootloader-reserved window in 0x7xxx_xxxx).  Zero size growth
+    # relative to the wifi-only patch: alloc-ranges(16 B) <-> reg(16 B),
+    # strings table unchanged ("reg" already present).
+    _raw_cs = _pw.find_path(_raw.root, _pw.RESERVED_MEMORY_NODE).child(
+        _pw.CONSYS_RMEM_NODE)
+    _pat_cs = _pw.find_path(_pat.root, _pw.RESERVED_MEMORY_NODE).child(
+        _pw.CONSYS_RMEM_NODE)
+    check("control: stock consys-reserve-memory has NO reg",
+          _raw_cs is not None and _raw_cs.get("reg") is None)
+    check("control: stock consys still has alloc-ranges",
+          _raw_cs is not None and _raw_cs.get("alloc-ranges") is not None)
+    check("consys gains fixed reg at 0xbf000000",
+          _pat_cs is not None and _pat_cs.get("reg") == struct.pack(
+              ">IIII", 0, _pw.CONSYS_RMEM_BASE, 0, _pw.CONSYS_RMEM_SIZE),
+          (_pat_cs.get("reg") or b"").hex())
+    check("consys alloc-ranges dropped (reg takes over)",
+          _pat_cs is not None and _pat_cs.get("alloc-ranges") is None)
+    check("consys compatible unchanged (mediatek,consys-reserve-memory)",
+          _pat_cs is not None
+          and _pat_cs.get("compatible") == _pw.CONSYS_RMEM_COMPAT,
+          repr(_pat_cs.get("compatible")))
+    check("consys no-map kept",
+          _pat_cs is not None and _pat_cs.get("no-map") is not None)
+
     # make_wifi_template.py anchors on this node name
     check("aw87329_pa anchor survives", b"aw87329_pa" in _out)
     # Board-specific charger limits must NOT be inherited from the 4G DTB. Compare
