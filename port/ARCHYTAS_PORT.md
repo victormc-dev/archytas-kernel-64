@@ -417,14 +417,10 @@ profile 必须在 strip 之前、`.modinfo` 必须在 strip 之后。
 - ESR `96000005` = EL1 数据异常、level-1 translation fault。
 - 内核把**任何 < TASK_SIZE 的故障地址**都报成 “Accessing user space memory outside uaccess.h routines”，
   所以这条消息**不等于**"32 位 ABI 问题"，NULL 附近的小偏移也会这样报。崩溃时 `x0=x1=x2=0`。
-- 最可能：`mtk_wcn_get_consys_ic_ops()` 返回 NULL（"Does not support on combo"），
+- **已确认根因**（见 9.5）：`mtk_wcn_get_consys_ic_ops()` 返回 NULL（"Does not support on combo"），
   `mtk_wmt_probe` 未判空即解引用。
 - **已排除**：DT 缺节点。运行时 `/sys/firmware/devices/18002000.consys` 存在，
   DTB 里 `consys@18002000` 完整（`compatible = "mediatek,mt6761-consys"`，11 段 `reg`、`clocks`、`wifi@18000000` 都在）。
-
-所以方向是**构建配置**：`build_mod common` 传的是 `CONFIG_MTK_COMBO_CHIP=CONSYS_6761`
-（而 `build_mod wlan` 传的是 `MTK_COMBO_CHIP=MT6761`，两边命名不一致，可疑），
-导致选中的 consys IC-ops 变体在这颗 SoC 上不存在。
 
 ### 9.4 设备当前状态与风险
 
@@ -435,6 +431,343 @@ profile 必须在 strip 之前、`.modinfo` 必须在 strip 之后。
 - 回滚路径：`dd if=port/_device_backup/bak_before_adrp/bak_before_adrp/boot.img of=/dev/block/by-name/boot bs=1M`。
 - 崩溃日志已归档：`port/_device_backup/panic_20261004/console-ramoops.txt`。
 
+### 9.5 Wi-Fi 不通的真因：`CONFIG_MTK_COMBO_CHIP` 的引号被抹掉了 ✅ 已修
+
+**一句话**：`common/Makefile:198` 用**带引号**的模式判断芯片选型，而我们的构建把值里的引号抹掉后在
+make 命令行覆盖 —— 于是 `common_main/platform/mt6761.o`（WMT IC-ops 的真正提供者）**从未被编译**。
+
+#### 病根：Kconfig 字符串值自带引号
+
+```
+# drivers/misc/mediatek/connectivity/Kconfig:128
+config MTK_COMBO_CHIP
+        string
+        default "CONSYS_6761" if MTK_COMBO_CHIP_CONSYS_6761     # defconfig 里是 y
+```
+
+Kconfig 写字符串值**保留引号**，所以 `.config`/`auto.conf` 里是
+`CONFIG_MTK_COMBO_CHIP="CONSYS_6761"`，make 展开得到 **12 个字符**的词 `"CONSYS_6761"`——
+注意**含双引号**。而模块 Makefile 的判断也带引号，两边是**配套设计**的：
+
+```make
+ifneq ($(filter "CONSYS_%",$(CONFIG_MTK_COMBO_CHIP)),)          # 198  模式含引号
+$(MODULE_NAME)-objs += common_main/platform/$(MTK_PLATFORM).o   # 199  芯片文件
+endif
+ifneq ($(filter "CONSYS_%",$(CONFIG_MTK_COMBO_CHIP)),)          # 113  → -D MTK_WCN_SOC_CHIP_SUPPORT
+ifneq ($(filter "CONSYS_%",$(CONFIG_MTK_COMBO_CHIP)),)          # 139  → -D MTK_WCN_WLAN_GEN2
+```
+
+旧脚本传的是 `CONFIG_MTK_COMBO_CHIP=CONSYS_6761`（**没引号**），而
+**make 命令行变量优先级高于 auto.conf**，于是覆盖掉了带引号的原值，
+`$(filter "CONSYS_%", CONSYS_6761)` 恒为空 —— 上面三处**同时失效**。
+
+#### 后果：`mtk_wmt_probe` 空指针
+
+`mt6761.c:1072` 的强符号没了，链接保留了 `mtk_wcn_consys_hw.c:149` 的弱存根：
+
+```c
+P_WMT_CONSYS_IC_OPS __weak mtk_wcn_get_consys_ic_ops(VOID)
+{ WMT_PLAT_PR_WARN("Does not support on combo\n"); return NULL; }
+```
+
+→ `wmt_consys_ic_ops` 恒为 NULL → `mtk_wmt_probe()` 第 166 行 `wmt_consys_ic_ops->consys_ic_need_store_pdev`
+（偏移 0）直接解引用 → panic（ESR `96000005`，`x0=x1=x2=0`）。前兆日志
+`mtk_wcn_get_consys_ic_ops:Does not support on combo` 就是那个弱存根打的。
+
+#### 铁证：符号表（不是字符串计数）
+
+**坑**：`strings | grep "Does not support on combo"` 在**原厂模块里也命中 1 次**，
+因为模块链接是 `ld -r`，被覆盖的弱函数体会作为死代码留在 `.text`、其日志字符串留在 `.rodata`。
+**只有符号表能区分**（新工具 `port/elf_symbols.py`，同时支持 ELF32/64）：
+
+| 符号 | 原厂 32 位 `wmt_drv.ko` | 我们（修复前） |
+| --- | --- | --- |
+| `mtk_wcn_get_consys_ic_ops` | **GLOBAL FUNC，24 B**（真实现 `return &consys_ic_ops`） | **WEAK FUNC，68 B**（NULL 存根） |
+| `consys_ic_ops`（172 B ops 表） | **GLOBAL OBJECT，存在** | **完全缺失** |
+| `mtk_wcn_consys_jtag_flag_ctrl` | GLOBAL，104 B | WEAK，68 B |
+
+#### 修法
+
+1. **不再凭空造值**：从内核自己的 `auto.conf`/`.config` 读出 `CONFIG_MTK_COMBO_CHIP`，
+   **保留引号**（`COMBO_CHIP_MAKE="\"$COMBO_CHIP\""`）；读不到才回落 `CONSYS_6761` 并告警。
+2. `MTK_PLATFORM` 同样从 `CONFIG_MTK_PLATFORM` 去引号得出 + 显式传给 `build_mod common`。
+   （正常情况下它是白送的：`arch/arm64/Makefile:138-140` 已经 `MTK_PLATFORM := $(CONFIG_MTK_PLATFORM:"%"=%)`
+   并 `export`；顶层 `Makefile:648` 的 `include arch/$(SRCARCH)/Makefile` 在 `KBUILD_EXTMOD` 分支**之外**，
+   所以 `M=` 构建里也生效。显式再断言一次是防回退。）
+3. **两道硬门禁**（任一不过就 FAIL，不让坏模块出厂）：
+   - 门禁 1：`$KOUT/.../common/common_main/platform/mt6761.o` 必须存在（紧跟 `build_mod common` 之后）。
+   - 门禁 2：`wmt_drv.ko` 的符号表里 `mtk_wcn_get_consys_ic_ops` 必须是 **GLOBAL**（不是 WEAK）、
+     且 `consys_ic_ops` 必须存在；读的是 **`strip -g` 之后**的字节，即真正推给设备的那个文件。
+4. 自检：`port/verify_build_script.py` 新增第 8 组（含**反向对照**：拿修复前的脚本跑会精确报出 9 条失败）。
+
+#### 顺带确认的两件事
+
+- `MTK_PLATFORM=mt6761` 下会多激活一批 `-I` 路径，均已核对在本内核树中存在：
+  `mt-plat/mt6761/include{,/mach}`、`base/power/mt6761`、`base/power/include/clkbuf_v1/mt6761`
+  （`mtk_clkbuf_hw.h` **只**在这个子目录里，也是必须带 `MTK_PLATFORM` 的另一个理由）、
+  `eccci/mt6761`、`emi/mt6761`。
+  不存在的 `mach/mt6761/include/mach`、`arch/arm/mach-mt6761`（`Makefile:49/93`）只是落空的 `-I`，
+  GCC 静默忽略，不报错。
+- `mt6761.c` 的 `consys_ic_ops` 初始化表**没有**赋 `.consys_ic_need_store_pdev`，
+  即该成员为 NULL —— 所以修复后 `mtk_wmt_probe` 的 `if (wmt_consys_ic_ops->consys_ic_need_store_pdev)`
+  会走 false 分支，不崩。
+- `wlan/adaptor`、`bt-mt66xx` 两仓**完全不引用** `CONFIG_MTK_COMBO_CHIP`/`MTK_PLATFORM`，
+  给它们传值无害但无用；`wlan core` 用 `$(CONFIG_MTK_PLATFORM)`（来自 auto.conf，不受影响）。
+
+### 9.6 第二个根因：wlan 芯片层整块没编（`MTK_COMBO_CHIP` 要传**家族名**）✅ 已修
+
+修完 9.5 后，`wmt_drv.ko` / `wmt_chrdev_wifi.ko` 加载成功、`mtk_wmt_probe` 完整跑通（真机证据见 9.7）。
+但加载 `wlan_drv_gen4m.ko` **仍然 panic**，只是崩溃点换了地方：
+
+```
+PC is at mtk_axi_probe+0x2c/0x48 [wlan_mt6761_axi]
+LR is at mtk_axi_probe+0x20/0x48 [wlan_mt6761_axi]      x1 : 0        <- NULL 解引用
+```
+
+#### 病根：`mtk_axi_probe` 从 `mtk_axi_ids[]` 取芯片数据，而该字段受 `#ifdef CONNAC` 控制
+
+```c
+/* os/linux/hif/axi/axi.c:101 */
+static const struct platform_device_id mtk_axi_ids[] = {
+    { .name = "CONNAC",
+#ifdef CONNAC
+      .driver_data = (kernel_ulong_t)&mt66xx_driver_data_connac },
+#endif
+#ifdef CONNAC2X2
+      .driver_data = (kernel_ulong_t)&mt66xx_driver_data_connac2x2 },
+#endif
+#ifdef SOC3_0
+      .driver_data = (kernel_ulong_t)&mt66xx_driver_data_soc3_0 },
+#endif
+    { /* end: all zeroes */ },
+};
+
+/* axi.c:744 mtk_axi_probe */
+prDriverData = (struct mt66xx_hif_driver_data *) mtk_axi_ids[0].driver_data;   /* -> NULL */
+prChipInfo   = prDriverData->chip_info;                                        /* -> 崩 */
+```
+
+`driver_data` 只在 `CONNAC`/`CONNAC2X2`/`SOC3_0` 被定义时才有值，而这三个宏由
+`wlan/Makefile` 从 **`MTK_COMBO_CHIP` 里的家族词**推出：
+
+```make
+ifneq ($(filter CONNAC,$(MTK_COMBO_CHIP)),)        # 101
+ccflags-y += $(filter-out -UCONNAC,$(ccflags-y))
+ccflags-y += -DCONNAC
+endif
+...
+ifneq ($(filter CONNAC,$(MTK_COMBO_CHIP)),)        # 590
+CHIPS_OBJS += $(CHIPS)connac/connac.o             # 592  <- 整层芯片数据
+endif
+```
+
+我们传的是 `MTK_COMBO_CHIP=MT6761` —— **零件号**，三个 `filter` 全不命中 ⇒
+`chips/connac/connac.o` 从未编译 ⇒ `mtk_axi_ids[0].driver_data = 0` ⇒ 首次 probe 就崩。
+
+**最阴的地方**：`CHIPS_OBJS += cmm_asic_connac.o` 与 `dbg_connac.o`（第 566–567 行）
+是**无条件**加的，所以模块看上去"有 connac 代码"，编译链接全绿、门禁也可能被骗过；
+真正缺的是**芯片数据**本身 —— `connac.c:385` 的
+`mt66xx_driver_data_connac = { .chip_info = &mt66xx_chip_info_connac }`。
+
+#### 修法：家族名 + 零件号**分开传**（与原厂 Android.mk 一致）
+
+原厂 `wlan/Android.mk:14` 就是这么干的：
+
+```make
+WIFI_OPTS := CONFIG_MTK_COMBO_WIFI_HIF=$(WIFI_HIF) MODULE_NAME=$(WIFI_NAME) \
+             MTK_COMBO_CHIP=$(WIFI_CHIP) WLAN_CHIP_ID=$(WLAN_CHIP_ID) ...
+```
+
+于是改成：
+
+```bash
+build_mod wlan  MTK_COMBO_CHIP=CONNAC WLAN_CHIP_ID=MT6761 ...
+```
+
+- `MTK_COMBO_CHIP=CONNAC` → 家族命中 `filter CONNAC` → `-DCONNAC` + 编进 `connac.o`。
+- `WLAN_CHIP_ID=MT6761` 显式给出零件号 —— **必须显式**，因为 `Makefile:71` 的
+  兜底是 `WLAN_CHIP_ID=$(word 1, $(MTK_COMBO_CHIP))`，现在会得到 `connac`，
+  模块名会变成 `wlan_connac_axi.ko`。显式传则维持 `wlan_mt6761_axi.ko`。
+
+#### 家族名是 `CONNAC` 的依据（全部来自**原厂 32 位模块**，符号表反查）
+
+| 证据 | 原厂 `wlan_drv_gen4m.ko` |
+| --- | --- |
+| `mt66xx_driver_data_connac` | **GLOBAL OBJECT 存在** |
+| `mt66xx_driver_data_connac2x2` | 不存在 ⇒ `CONNAC2X2` 未定义 |
+| `mt66xx_driver_data_soc3_0` | 不存在 ⇒ `SOC3_0` 未定义 |
+| `mtk_wcn_wmt_wlan_reg` | **被引用** ⇒ 走 WMT 路径，`CFG_SUPPORT_CONNINFRA=0` |
+| `mtk_wcn_wlan_reg` / `conninfra*` | 都不存在 ⇒ 确认不是 conninfra/SOC3_0 |
+| `srcversion` | `533BB7E5866E52F63B9ACCB`，与我们编出的**完全一致** |
+| `depends` | `wmt_drv,wmt_chrdev_wifi`（我们为 `depends=` 空 —— 见下） |
+
+#### 新增门禁（都带反向对照）
+
+- 门禁 2：`$KOUT/.../wlan/chips/connac/connac.o` 必须存在（紧跟 `build_mod wlan`）。
+- 门禁 4：`wlan_drv_gen4m.ko` 的符号表里必须有 `GLOBAL OBJECT mt66xx_driver_data_*`，
+  读的是 `strip -g` 之后的字节 —— 即 `mtk_axi_ids[0].driver_data` 非空。原厂模块 PASS、
+  我们修复前的产物 FAIL（0 命中），两个极性都验过。
+
+#### 一个已知的、无害的差异：`depends=` 为空
+
+原厂模块 `.modinfo` 是 `depends=wmt_drv,wmt_chrdev_wifi`，我们的是空。
+原因：我们把四个模块**分四次 make** 调用，modpost 看不到彼此的导出符号，所以跨模块依赖
+统计不到。`depends` 只被 `modprobe` 用来决定加载顺序；我们是手动按序 `insmod`，
+且符号解析走 `__ksymtab`/`__versions`，与 `depends` 无关 —— 实测 `wmt_drv` 已成功加载。
+
+### 9.7 第三个根因：DTB 缺 `memory-region`，reserved-memory 不是 DMA pool ✅ 已修
+
+**现象**：9.5/9.6 两个根因修完后，`wmt_drv` / `wmt_chrdev_wifi` / `wlan_drv_gen4m`
+三个模块 `insmod` 全部 `RC=0`（不再 panic），但 **`wlan0` 不出现**，且 dmesg 里
+`wlan_assistant` 写 NVRAM 被拒：`Wi-Fi driver is not ready for write NVRAM`。
+
+**干净加载轨迹**（`dmesg -c` 后重载 wlan）：
+
+```
+zain_gl: initWlan enter
+wlanCreateWirelessDevice:(INIT INFO) Create wireless device success
+zain_axi: mtk_axi_probe enter pdev=ffffffc07cb80800
+zain_axi: fallback node=ffffffc07ff03108
+axiCsrIoremap:(INIT INFO) CSRBaseAddress:0xFFFFFF8016500000 ioremap region 0x100000 @ 0x18000000
+zain_axi: CSR map ok
+axiDmaSetup:(INIT ERROR) of_reserved_mem_device_init failed(-19)
+zain_axi: DMA setup ret=-19
+mtk_axi_probe:(INIT INFO) mtk_axi_probe() done, ret: -19
+zain_axi: glRegisterBus ret=0 g_prPlatDev=ffffffc07cb80800
+initWlan:(INIT INFO) initWlan::End
+```
+
+**为什么 `-19` 是致命的**（`os/linux/hif/axi/axi.c`，`mtk_axi_probe`）：
+
+```c
+ret = axiDmaSetup(pdev, prDriverData);
+if (ret)
+        goto exit;                     /* ← 直接跳走 */
+...
+mtk_wcn_wmt_wlan_reg(&rWmtCb);         /* WMT 回调注册被整个跳过 */
+```
+
+DMA 初始化一失败，**WMT wlan 回调从未注册** → wlan 永不上电 → 没有 `wlan0`，
+且除了这一行 ERROR 之外**没有任何其他报错**（所以极易误判为"模块加载成功但网卡没出现"）。
+
+#### 定位过程：先证伪"源码看错"，再锁定 DTB
+
+`axiDmaSetup` 被 agui 的两个补丁改过（`vendor/archimedes-wlan/0001-*.patch` +
+`Documentation/wifi-coherent-dma-58c7ba5.patch`）。把两个补丁**按序**打到干净源码上
+（`patch -p1`，`git apply --3way` 因嵌套仓库索引不匹配会部分失败，**必须用 `patch`**），
+得到真实代码：
+
+```c
+#if AXI_CFG_PREALLOC_MEMORY_BUFFER            /* = 1, os/linux/hif/axi/include/hif.h:98 */
+    if (!gWifiRsvMemPhyBase || !gWifiRsvMemSize) { /* ① 解析 DT memory-region */
+            rmem_np = of_parse_phandle(pdev->dev.of_node, "memory-region", 0);
+            ...
+    }
+    if (!gWifiRsvMemPhyBase || !gWifiRsvMemSize) { /* ② 拿不到才 -ENOMEM(-12) */
+            ret = -ENOMEM; goto exit;
+    }
+    ret = of_reserved_mem_device_init(&pdev->dev);  /* ③ 实测在这里 -19 */
+    if (ret) { DBGLOG(..., "of_reserved_mem_device_init failed(%d)\n", ret); goto exit; }
+#endif
+```
+
+日志里**没有** ①② 的 `wifi reserved memory unavailable`、返回的也是 **-19 而不是 -12**
+⇒ 全局量 `gWifiRsvMemPhyBase`/`gWifiRsvMemSize` **开机就非 0**（① ② 被跳过），
+失败点唯一：③ 的 `of_reserved_mem_device_init`。
+
+#### 两个全局量的来源（内核提供，不是模块）
+
+`drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.c`：
+
+```c
+phys_addr_t gWifiRsvMemPhyBase;        EXPORT_SYMBOL(gWifiRsvMemPhyBase);
+unsigned long long gWifiRsvMemSize;    EXPORT_SYMBOL(gWifiRsvMemSize);
+int reserve_memory_wifi_fn(struct reserved_mem *rmem)
+{   gWifiRsvMemPhyBase = rmem->base;  gWifiRsvMemSize = rmem->size;  return 0; }
+RESERVEDMEM_OF_DECLARE(reserve_memory_wifi, "mediatek,wifi-reserve-memory",
+                       reserve_memory_wifi_fn);
+```
+
+`RESERVEDMEM_OF_DECLARE` 是**按 compatible 扫 `reserved-memory` 子节点**触发的，
+**不需要** `memory-region` 句柄 —— 所以原厂 32 位驱动（符号表里同样只有
+`gWifiRsvMemPhyBase` UND、**没有** `of_reserved_mem_device_init`）能正常工作，
+而这份较新的 Gen4M 驱动多调了一次 `of_reserved_mem_device_init`，就撞上了缺口。
+
+#### 真因：DT 两处缺失
+
+```
+# 设备实际 DT（= port/wifi_stock.dtb，md5 3a04f8f0… 与 port/4g_oem_boot.dtb 相同）
+wifi@18000000 { compatible="mediatek,wifi"; reg=...; interrupts=...; }   ← 无 memory-region
+
+reserved-memory/wifi-reserve-memory {
+    compatible = "mediatek,wifi-reserve-memory";   ← 只有 MTK 自己的 compatible
+    no-map; size = <0x0 0x300000>; alignment = <0x0 0x1000000>;
+    alloc-ranges = <0x0 0x40000000 0x0 0x80000000>;  ← no-map 动态分配，不是 DMA pool
+};
+```
+
+`of_reserved_mem_device_init` 的两级失败：
+
+| 级 | 检查 | 缺失时的返回 |
+|---|---|---|
+| 1 | `of_parse_phandle(dev->of_node, "memory-region", 0)` | 空 → **-ENODEV(-19)** ← 实测 |
+| 2 | `rmem->ops` 必须是 `rmem_dma_ops`（`ops->device_init`）| 空 → -EINVAL(-22) |
+
+第 2 级的坑在于：**`shared-dma-pool` 有两个 `RESERVEDMEM_OF_DECLARE`**，靠 `no-map` 分流：
+
+| 声明处 | 函数 | 对 `no-map` 的态度 |
+|---|---|---|
+| `drivers/base/dma-contiguous.c`（Makefile 先链接）| `rmem_cma_setup` | **有 `no-map` → 返回 -EINVAL，跳过** |
+| `drivers/base/dma-coherent.c`（后链接）| `rmem_dma_setup` | 安装 `rmem->ops = &rmem_dma_ops` **→ 胜出** |
+
+⇒ **`no-map` 必须保留**（删了反而会被 CMA 抢走）。
+
+**决定性证据**：`port/4g_stock.dtb`（更新版 4G 固件，同一 SoC）里同一个节点**已经修好**：
+
+```dts
+wifi-reserve-memory {
+    phandle = <0xa8>;
+    reg = <0x0 0x7f000000 0x0 0x300000>;
+    compatible = "shared-dma-pool", "mediatek,wifi-reserve-memory";
+    no-map; size = <0x0 0x300000>; alignment = <0x0 0x1000000>;
+};
+wifi@18000000 { compatible="mediatek,wifi"; memory-region = <0xa8>; ... };
+```
+
+两份 DTB 反编译后**只有 3 处不同**：这个节点、`memory-region`、和两个充电电流值
+（`ac_charger_input_current` 1.1A vs 1.05A、`charging_host_charger_current` 0.5A vs 1.5A）
+—— 充电参数是**板级硬件差异，不能照搬 4G 的**，所以不能直接换 DTB。
+
+#### 修法：`port/patch_wifi_dtb.py`（最小 FDT 手术，幂等）
+
+自写 FDT 解析/重排器（不依赖 dtc），只改两个节点，其余字节（含充电参数）原样保留：
+
+- `reserved-memory/wifi-reserve-memory`：加 `shared-dma-pool`、加 `reg = <0 0x7f000000 0 0x300000>`、
+  删 `alloc-ranges`、**保留 `no-map`/`size`/`alignment`**、分配一个空闲 phandle（自动选中 **0xa8**，
+  与 4G 那份一致）。
+- `wifi@18000000`：加 `memory-region = <0xa8>`。
+
+**`0x7f000000` 在本机不冲突**（从真机 `/proc/device-tree/reserved-memory/*/reg` 读的 bootloader 保留区）：
+
+| 节点 | 范围 |
+|---|---|
+| `mblock-9-SPM-reserved` | `0x77ff0000` .. `0x78000000` |
+| **本次占用** | **`0x7f000000` .. `0x7f300000`** |
+| `mblock-7-framebuffer` | `0x7f980000` .. `0x7feb0000` |
+| `mblock-6-SSPM-reserved` | `0x7feb0000` .. `0x7ffb0000` |
+| `mblock-3-log_store` | `0x7ffbf000` .. `0x7ffff000` |
+
+校验方式：修补后 `dtb_dump.py` 反编译，与 `4g_stock.dtb` 的 dump 做 diff ——
+**只剩两个充电电流值**，即结构上与厂商修好的那份完全等价，而板级参数仍是 WiFi 版的。
+`aw87329_pa`（`make_wifi_template.py` 的自检锚点）保留 4 处。
+
+#### CI 接线
+
+`build.yml` 在 "Package boot images" 之前新增一步
+`Patch the Wi-Fi DTB (reserved-memory DMA pool for the Gen4M driver)`，
+`--wifi-dtb` 由 `port/wifi_stock.dtb` 改为 `port/wifi_archytas.dtb`（stage2 与 both 两处）。
+`port/build_archytas_wifi.sh` 同步（本地/手动构建走同一条路）。
+
 ---
 
-*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*
+*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*

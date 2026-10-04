@@ -151,6 +151,24 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           ls -l "$OUT"
 
+      # The Wi-Fi ROM DTB declares reserved-memory/wifi-reserve-memory as a
+      # *plain* no-map region ("mediatek,wifi-reserve-memory" only), so the
+      # Gen4M WLAN core's axiDmaSetup() -> of_reserved_mem_device_init() aborts
+      # with -ENODEV/-EINVAL and mtk_wmt_probe() short-circuits before it ever
+      # registers the WMT wlan callbacks -- no wlan0, no errors beyond the -19.
+      # patch_wifi_dtb.py adds "shared-dma-pool" + a fixed "reg" + a phandle and
+      # binds it from the wifi@18000000 node, reproducing the node the newer 4G
+      # firmware DTB (port/4g_stock.dtb) ships for the same SoC. Everything else
+      # in the Wi-Fi board DTB is preserved byte-for-byte, notably the charger
+      # current limits which legitimately differ between the two boards.
+      - name: Patch the Wi-Fi DTB (reserved-memory DMA pool for the Gen4M driver)
+        if: ${{ github.event.inputs.modules_only != 'true' }}
+        run: |
+          python3 port/patch_wifi_dtb.py \
+            --input port/wifi_stock.dtb \
+            --output port/wifi_archytas.dtb
+          ls -l port/wifi_stock.dtb port/wifi_archytas.dtb
+
       - name: Package boot images
         if: ${{ github.event.inputs.modules_only != 'true' }}
         env:
@@ -167,7 +185,7 @@ jobs:
               ;;
             stage2)
               python3 port/make_wifi_template.py \
-                --template "$TPL" --wifi-dtb port/wifi_stock.dtb \
+                --template "$TPL" --wifi-dtb port/wifi_archytas.dtb \
                 --output wifi-template-32MiB.img
               python3 kernel/package_archimedes_boot.py \
                 --template wifi-template-32MiB.img --kernel "$KERNEL" \
@@ -178,7 +196,7 @@ jobs:
                 --template "$TPL" --kernel "$KERNEL" \
                 --output boot-archytas-wifi-stage1.img
               python3 port/make_wifi_template.py \
-                --template "$TPL" --wifi-dtb port/wifi_stock.dtb \
+                --template "$TPL" --wifi-dtb port/wifi_archytas.dtb \
                 --output wifi-template-32MiB.img
               python3 kernel/package_archimedes_boot.py \
                 --template wifi-template-32MiB.img --kernel "$KERNEL" \

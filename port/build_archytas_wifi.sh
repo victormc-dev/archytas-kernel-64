@@ -12,7 +12,8 @@
 # What it does:
 #   1. Copies k61v1_64_archytas_defconfig into the kernel tree.
 #   2. Builds arch/arm64/boot/Image.gz-dtb (kernel code == 4G build).
-#   3. Swaps the 4G DTB inside the 32 MiB template for the Wi-Fi DTB.
+#   3. Patches the Wi-Fi ROM DTB (port/patch_wifi_dtb.py) so the Gen4M WLAN
+#      driver gets a reserved-memory DMA pool, then swaps it into the template.
 #   4. Packages boot-archytas-wifi.img with the validated MTK v1 layout.
 #
 # Output:
@@ -24,6 +25,7 @@ PORT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 KERNEL=${KERNEL:-"$PORT/../archimedes-kernel-64-main"}
 TEMPLATE=${TEMPLATE:-"$KERNEL/tools/archimedes-boot-template-32MiB.img"}
 WIFI_DTB=${WIFI_DTB:-"$PORT/wifi_stock.dtb"}
+WIFI_DTB_PATCHED=${WIFI_DTB_PATCHED:-"$PORT/wifi_archytas.dtb"}
 CROSS=${CROSS_COMPILE:-aarch64-linux-gnu-}
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 24)}
 OUT=${OUT:-"$PORT/out-archytas-wifi"}
@@ -59,8 +61,19 @@ IMG="$OUT/arch/arm64/boot/Image.gz-dtb"
 [[ -f "$IMG" ]] || die "kernel build did not produce $IMG"
 
 # 3) make Wi-Fi boot template (swap 4G DTB -> Wi-Fi DTB)
+#
+#    The raw Wi-Fi ROM DTB declares reserved-memory/wifi-reserve-memory as a
+#    plain no-map region, which makes the Gen4M WLAN core abort in
+#    axiDmaSetup() -> of_reserved_mem_device_init() and never register its WMT
+#    wlan callbacks (no wlan0).  patch_wifi_dtb.py turns that node into a
+#    coherent "shared-dma-pool" with a fixed window and binds it from
+#    wifi@18000000 -- the same node the newer 4G firmware DTB ships -- while
+#    leaving every other byte (charger limits!) of the Wi-Fi DTB untouched.
+echo "==> patching Wi-Fi DTB (reserved-memory DMA pool)"
+python3 "$PORT/patch_wifi_dtb.py" --input "$WIFI_DTB" --output "$WIFI_DTB_PATCHED"
+
 echo "==> making Wi-Fi boot template"
-python3 "$PORT/make_wifi_template.py" --template "$TEMPLATE" --wifi-dtb "$WIFI_DTB" --output "$WIFI_TEMPLATE"
+python3 "$PORT/make_wifi_template.py" --template "$TEMPLATE" --wifi-dtb "$WIFI_DTB_PATCHED" --output "$WIFI_TEMPLATE"
 
 # 4) package
 echo "==> packaging boot image"
