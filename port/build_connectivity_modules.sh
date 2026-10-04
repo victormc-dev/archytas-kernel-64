@@ -13,7 +13,8 @@
 # repos at vendor/mediatek/kernel_modules/connectivity/...):
 #
 #   vendor/mediatek/kernel_modules/connectivity/common      -> wmt_drv.ko
-#   vendor/mediatek/kernel_modules/connectivity/wlan        -> wlan_6761_axi.ko
+#   vendor/mediatek/kernel_modules/connectivity/wlan        -> wlan_mt6761_axi.ko
+#        (derived as wlan_<lower(WLAN_CHIP_ID)>_<HIF>; WLAN_CHIP_ID=word1(MTK_COMBO_CHIP)=MT6761)
 #   vendor/mediatek/kernel_modules/connectivity/wlan/adaptor-> wmt_chrdev_wifi.ko
 #   vendor/mediatek/kernel_modules/connectivity/bt          -> bt_drv.ko
 #
@@ -257,16 +258,47 @@ build_mod wlan    MTK_COMBO_CHIP=MT6761 \
                     CONFIG_WLAN_DRV_BUILD_IN=n
 
 # ---- 5. Collect the four modules -------------------------------------------
+# The wlan-core module name is DERIVED by its own Makefile, NOT fixed:
+#   MODULE_NAME := wlan_<lower(WLAN_CHIP_ID)>_<CONFIG_MTK_COMBO_WIFI_HIF>
+#   WLAN_CHIP_ID = $(word 1, $(MTK_COMBO_CHIP))
+# We invoke it with MTK_COMBO_CHIP=MT6761 + HIF=axi, so the real filename is
+#   wlan_mt6761_axi.ko          (note the 'mt' prefix: lower('MT6761')='mt6761')
+# The old hardcoded 'wlan_6761_axi.ko' never matched, so this step silently
+# dropped the main Wi-Fi driver and the artifact shipped with only 3 of 4 .ko.
+# Match any wlan_*.ko (chipid-agnostic) and FAIL LOUDLY when it is missing.
 OUTDIR="$KOUT/connectivity-modules"
 mkdir -p "$OUTDIR"
 find "$KOUT" "$KROOT/$CONN" -name 'wmt_drv.ko'        -exec cp -f {} "$OUTDIR/" \;
 find "$KOUT" "$KROOT/$CONN" -name 'wmt_chrdev_wifi.ko' -exec cp -f {} "$OUTDIR/" \;
 find "$KOUT" "$KROOT/$CONN" -name 'bt_drv.ko'         -exec cp -f {} "$OUTDIR/" \;
-_w=$(find "$KOUT" "$KROOT/$CONN" -name 'wlan_6761_axi.ko' | head -1)
-if [ -n "$_w" ]; then cp -f "$_w" "$OUTDIR/wlan_drv_gen4m.ko"; fi
+
+echo "=== debug: every .ko produced under KOUT ==="
+find "$KOUT" -type f -name '*.ko' 2>/dev/null | sort || true
+
+_w=$(find "$KOUT" "$KROOT/$CONN" -type f -name 'wlan_*.ko' 2>/dev/null | head -1)
+if [ -n "$_w" ]; then
+  cp -f "$_w" "$OUTDIR/wlan_drv_gen4m.ko"
+  echo "   wlan core module: $(basename "$_w") -> wlan_drv_gen4m.ko"
+else
+  echo "ERROR: wlan core module (wlan_*.ko) not found; expected wlan_mt6761_axi.ko"
+  exit 1
+fi
 
 echo "=== built connectivity modules ==="
 ls -l "$OUTDIR"/*.ko 2>/dev/null || { echo "ERROR: no modules produced"; exit 1; }
+
+# Hard assertion: the artifact must contain all four modules. Without this the
+# CI could go green while silently shipping an incomplete set (the exact bug
+# that produced build #8 with only wmt_drv/wmt_chrdev_wifi/bt_drv).
+_missing=""
+for _want in wmt_drv wmt_chrdev_wifi bt_drv wlan_drv_gen4m; do
+  [ -f "$OUTDIR/$_want.ko" ] || _missing="$_missing $_want.ko"
+done
+if [ -n "$_missing" ]; then
+  echo "ERROR: missing connectivity modules:$_missing"
+  exit 1
+fi
+echo "   OK: all 4 connectivity modules present."
 
 # vermagic sanity check
 echo "=== vermagic ==="
