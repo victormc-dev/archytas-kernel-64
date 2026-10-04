@@ -33,6 +33,15 @@ downloaded CI artifact; those skip cleanly when absent). Checks:
      chips/connac/connac.o was never compiled and `mtk_axi_ids[0].driver_data`
      stayed 0 -> mtk_axi_probe+0x2c dereferenced NULL and panicked. Also includes
      a negative control.
+ 10. the Wi-Fi DTB patch. The ROM DTB has no "memory-region" on wifi@18000000
+     and its wifi-reserve-memory node is a plain no-map MTK region, so the Gen4M
+     core's of_reserved_mem_device_init() returns -ENODEV and mtk_axi_probe()
+     exits before mtk_wcn_wmt_wlan_reg() -- no panic, no wlan0, no other error.
+     Asserts the patched node matches the vendor 4g_stock.dtb structurally while
+     keeping the Wi-Fi board's own charger limits, that "no-map" is retained
+     (it is what routes the node to rmem_dma_setup instead of rmem_cma_setup),
+     that the patch is idempotent, and that the workflow packages the patched
+     DTB. Includes negative controls on the unpatched DTB.
 
 The Bash tool rewrites backslashes inside heredocs, so running snippets
 straight from a shell command line is unreliable -- hence this harness.
@@ -40,6 +49,7 @@ straight from a shell command line is unreliable -- hence this harness.
 import ast
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -406,6 +416,112 @@ else:
               "matching symbol(s)" in r.stdout
               and re.search(r"^  mt66xx_driver_data_", r.stdout, re.M) is None,
               r.stdout.strip().replace("\n", " | ")[:160])
+
+print("\n== 10. Wi-Fi DTB: reserved-memory DMA pool for the Gen4M WLAN driver ==")
+# The Wi-Fi ROM DTB has no "memory-region" on wifi@18000000 and declares
+# reserved-memory/wifi-reserve-memory as a plain no-map MTK region. The Gen4M
+# core calls of_reserved_mem_device_init() from axiDmaSetup(), gets -ENODEV and
+# bails out before mtk_wcn_wmt_wlan_reg() -- every module insmods RC=0, nothing
+# panics, and wlan0 just never shows up. patch_wifi_dtb.py closes both gaps.
+DTB_IN = ROOT / "port" / "wifi_stock.dtb"
+DTB_REF = ROOT / "port" / "4g_stock.dtb"
+if not DTB_IN.exists():
+    print("   SKIP (port/wifi_stock.dtb missing)")
+else:
+    sys.path.insert(0, str(ROOT / "port"))
+    import patch_wifi_dtb as _pw
+
+    # negative control: the unpatched ROM DTB must fail these checks
+    _raw = _pw.Fdt(DTB_IN.read_bytes())
+    _raw_wifi = _raw.root.child(_pw.WIFI_NODE)
+    _raw_rm = _pw.find_path(_raw.root, _pw.RESERVED_MEMORY_NODE).child(
+        _pw.WIFI_RMEM_NODE)
+    check("control: stock DTB has NO memory-region on wifi@18000000",
+          _raw_wifi.get("memory-region") is None, "present already?!")
+    check("control: stock DTB node is not a shared-dma-pool",
+          b"shared-dma-pool" not in (_raw_rm.get("compatible") or b""),
+          repr(_raw_rm.get("compatible")))
+
+    _out, _changed = _pw.patch(DTB_IN.read_bytes())
+    check("patch reports a change", _changed is True)
+    _pat = _pw.Fdt(_out)
+    _pw_wifi = _pat.root.child(_pw.WIFI_NODE)
+    _pw_rm = _pw.find_path(_pat.root, _pw.RESERVED_MEMORY_NODE).child(
+        _pw.WIFI_RMEM_NODE)
+
+    check("compatible gains shared-dma-pool",
+          _pw_rm.get("compatible") == _pw.WIFI_RMEM_COMPAT,
+          repr(_pw_rm.get("compatible")))
+    check("reg is the fixed 3 MiB window",
+          _pw_rm.get("reg") == struct.pack(">IIII", 0, _pw.WIFI_RMEM_BASE, 0,
+                                           _pw.WIFI_RMEM_SIZE),
+          _pw_rm.get("reg").hex())
+    check("alloc-ranges dropped (reg takes over)",
+          _pw_rm.get("alloc-ranges") is None)
+    # no-map MUST stay: it is what routes the node past rmem_cma_setup() to
+    # rmem_dma_setup(), the only one that installs rmem->ops.
+    check("no-map kept (routes to rmem_dma_setup, not CMA)",
+          _pw_rm.get("no-map") is not None)
+    check("phandle assigned and bound from wifi@18000000",
+          _pw_wifi.get("memory-region") is not None
+          and _pw_wifi.get("memory-region") == _pw_rm.get("phandle"),
+          (_pw_rm.get("phandle") or b"").hex())
+    check("idempotent (second run is a no-op)",
+          _pw.patch(_out) == (_out, False))
+    # make_wifi_template.py anchors on this node name
+    check("aw87329_pa anchor survives", b"aw87329_pa" in _out)
+    # Board-specific charger limits must NOT be inherited from the 4G DTB. Compare
+    # the /charger node itself -- a raw byte search is useless here because e.g.
+    # 0x00100590 legitimately appears once in /lk_charger of the Wi-Fi DTB too.
+    def _charger(fdt):
+        n = fdt.root.child("charger")
+        return dict(n.props) if n is not None else {}
+
+    def _lk_charger(fdt):
+        n = fdt.root.child("lk_charger")
+        return dict(n.props) if n is not None else {}
+
+    _c_wifi, _c_pat = _charger(_raw), _charger(_pat)
+    check("board-specific /charger values untouched by the patch",
+          _c_pat == _c_wifi
+          and _c_wifi.get("ac_charger_input_current") == struct.pack(">I", 0x10C8E0)
+          and _c_wifi.get("charging_host_charger_current") == struct.pack(">I", 0x7A120),
+          "patched ac=%s host=%s"
+          % ((_c_pat.get("ac_charger_input_current") or b"").hex(),
+             (_c_pat.get("charging_host_charger_current") or b"").hex()))
+    if DTB_REF.exists():
+        _c_ref = _charger(_pw.Fdt(DTB_REF.read_bytes()))
+        check("...and they really do differ from the 4G board's",
+              _c_ref.get("ac_charger_input_current")
+              != _c_wifi.get("ac_charger_input_current"),
+              "4g ac=%s" % (_c_ref.get("ac_charger_input_current") or b"").hex())
+        check("the patch leaves /lk_charger alone as well",
+              _lk_charger(_pat) == _lk_charger(_raw))
+    if DTB_REF.exists():
+        # The reference is the vendor's *own* fixed-up DTB for the same SoC, so
+        # after patching, the only textual difference may be the two charger
+        # values. Compare structurally, ignoring property order.
+        def _nodes(fdt, *path):
+            return _pw.find_path(fdt.root, *path)
+
+        _ref = _pw.Fdt(DTB_REF.read_bytes())
+        for _p in (("reserved-memory", "wifi-reserve-memory"), (_pw.WIFI_NODE,)):
+            _a = _nodes(_pat, *_p)
+            _b = _nodes(_ref, *_p)
+            check("matches 4g_stock.dtb on /%s" % "/".join(_p),
+                  sorted(_a.props) == sorted(_b.props),
+                  "patched=%r ref=%r" % (sorted(_a.props), sorted(_b.props)))
+    else:
+        print("   SKIP 4g_stock.dtb comparison (reference DTB missing)")
+
+# The workflow must patch the DTB and package the patched one.
+_wf = WORKFLOW.read_text(encoding="utf-8") if WORKFLOW.exists() else ""
+check("workflow runs port/patch_wifi_dtb.py",
+      "patch_wifi_dtb.py" in _wf)
+check("workflow packages port/wifi_archytas.dtb",
+      "wifi-dtb port/wifi_archytas.dtb" in _wf)
+check("workflow no longer packages the unpatched DTB",
+      "wifi-dtb port/wifi_stock.dtb" not in _wf)
 
 print("\n================ %s ================" % (
     "ALL CHECKS PASS" if not failures else "FAILURES: " + ", ".join(failures)))
