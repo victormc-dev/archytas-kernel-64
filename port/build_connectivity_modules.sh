@@ -133,7 +133,10 @@ done
 # module's ccflags-y, so the module's -Werror wins (GCC last-flag-wins); strip it
 # from every Makefile under the connectivity tree instead.
 echo ">> neutralize -Werror in module Makefiles"
-find "$KROOT/$CONN" -type f \( -name 'Makefile' -o -name '*.mk' \) -print0 \
+# Match Makefile, Kbuild (kernel modules often use 'Kbuild' as the makefile
+# name, e.g. under os/linux/) and *.mk -- any of these can carry a bare
+# 'ccflags-y += -Werror' that escalates benign warnings to hard errors.
+find "$KROOT/$CONN" -type f \( -name 'Makefile' -o -name 'Kbuild' -o -name '*.mk' \) -print0 \
   | while IFS= read -r -d '' m; do
       sed -i -E 's/-Werror=[A-Za-z0-9_+-]+//g; s/-Werror([[:space:]]|$)/ /g' "$m"
     done
