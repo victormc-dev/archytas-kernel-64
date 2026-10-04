@@ -125,6 +125,19 @@ for p in "$PATCH1" "$PATCH2"; do
   fi
 done
 
+# ---- 2b. Neutralize -Werror in the out-of-tree module Makefiles ------------
+# These old MTK modules (common, wlan-core, ...) add a bare 'ccflags-y += -Werror'
+# to their Makefiles. Under GCC 11 the benign pointer-sign warnings that the 4.9
+# kernel headers now emit become hard errors ("cc1: all warnings being treated
+# as errors") and the build fails. Our KCFLAGS=-Wno-error is prepended BEFORE the
+# module's ccflags-y, so the module's -Werror wins (GCC last-flag-wins); strip it
+# from every Makefile under the connectivity tree instead.
+echo ">> neutralize -Werror in module Makefiles"
+find "$KROOT/$CONN" -type f \( -name 'Makefile' -o -name '*.mk' \) -print0 \
+  | while IFS= read -r -d '' m; do
+      sed -i -E 's/-Werror=[A-Za-z0-9_+-]+//g; s/-Werror([[:space:]]|$)/ /g' "$m"
+    done
+
 # ---- 3. Prepare generated headers / vmlinux symtab for out-of-tree modpost
 echo ">> modules_prepare"
 make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
