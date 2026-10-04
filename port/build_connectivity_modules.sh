@@ -22,8 +22,13 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-KROOT="${1:-$ROOT/kernel}"
-KOUT="${2:-$ROOT/kernel/out-archytas}"
+# Normalize KROOT/KOUT to ABSOLUTE paths. Kbuild resolves O= relative to the
+# directory entered via 'make -C $KROOT', so a relative O= would be re-based as
+# $KROOT/$KOUT (e.g. kernel/kernel/out-archytas) and the prebuilt .config there
+# would be missing -> "Configuration file .config not found" at modules_prepare.
+abspath() { ( cd "$(dirname "$1")" 2>/dev/null && echo "$(pwd)/$(basename "$1")" ) || echo "$1"; }
+KROOT="$(abspath "${1:-$ROOT/kernel}")"
+KOUT="$(abspath "${2:-$ROOT/kernel/out-archytas}")"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
@@ -48,10 +53,23 @@ fetch_repo() {
   if ! git clone --depth 1 "$url" "$dest" >/dev/null 2>&1; then
     echo "ERROR: clone failed for $url"; exit 1
   fi
-  # Pin to the exact commit (shallow fetch of that object, then checkout).
-  git -C "$dest" fetch --depth 1 origin "$commit" >/dev/null 2>&1 || \
-    git -C "$dest" fetch origin "$commit" --depth 1 >/dev/null 2>&1 || true
-  if ! git -C "$dest" checkout -q "$commit" 2>/dev/null; then
+  # Pin to the exact commit. GitHub allows fetching a bare SHA; try a shallow
+  # fetch first, then a plain fetch, then (last resort) unshallow the clone so
+  # the pinned object is actually reachable before checkout.
+  _pinned=0
+  if git -C "$dest" fetch --depth 1 origin "$commit" >/dev/null 2>&1; then
+    _pinned=1
+  elif git -C "$dest" fetch origin "$commit" >/dev/null 2>&1; then
+    _pinned=1
+  else
+    git -C "$dest" fetch --unshallow origin >/dev/null 2>&1 || true
+    if git -C "$dest" fetch origin "$commit" >/dev/null 2>&1; then
+      _pinned=1
+    fi
+  fi
+  if [ "$_pinned" = 1 ] && git -C "$dest" checkout -q "$commit" 2>/dev/null; then
+    echo "   pinned to $commit"
+  else
     echo "WARN: could not checkout $commit in $dest (using clone tip)"
   fi
 }
