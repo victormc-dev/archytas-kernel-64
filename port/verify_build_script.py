@@ -21,6 +21,13 @@ downloaded CI artifact; those skip cleanly when absent). Checks:
      collect-at-the-end sweep then cannot find it. That was run #37189514054:
      wmt_chrdev_wifi.ko linked fine at 08:47:34, gone by the 08:48:14 find.
   7. the `.modinfo` extractor reads name=/vermagic= out of a real .ko.
+  8. the CONFIG_MTK_COMBO_CHIP quoting fix + the two IC-ops gates. Kconfig keeps
+     its string values quoted and common/Makefile matches them with quoted
+     patterns (`$(filter "CONSYS_%",...)`), so overriding the variable with a
+     BARE `CONSYS_6761` on the make command line silently switched off
+     common_main/platform/mt6761.o -- the module then kept the __weak
+     mtk_wcn_get_consys_ic_ops stub and mtk_wmt_probe() panicked on a NULL
+     wmt_consys_ic_ops. Includes a negative control on the pre-fix artifact.
 
 The Bash tool rewrites backslashes inside heredocs, so running snippets
 straight from a shell command line is unreliable -- hence this harness.
@@ -249,6 +256,92 @@ else:
         r = subprocess.run([EXE, "-c", code, str(ko)], capture_output=True, text=True)
         out = (r.stdout + r.stderr).strip()
         check("%s readable" % ko.name, r.returncode == 0 and "vermagic=" in out, out)
+
+print("\n== 8. COMBO_CHIP quoting fix + IC-ops linkage gates ==")
+# (a) The regression itself. Kconfig stores string symbols WITH quotes
+#     (auto.conf: CONFIG_MTK_COMBO_CHIP="CONSYS_6761") and common/Makefile:198
+#     matches them with a quoted pattern, so passing a bare word on the make
+#     command line makes every one of those filters miss. "$COMBO_CHIP_MAKE" is
+#     the good form; a literal bare value is the bug.
+_bare = [m for m in re.findall(r'CONFIG_MTK_COMBO_CHIP=(?!")([^\s\\"\']+)', text)
+         if not m.startswith("$")]
+check("CONFIG_MTK_COMBO_CHIP is never passed as a bare word", not _bare,
+      "bare value(s): %s" % _bare)
+check("the value is re-quoted before it is handed to make",
+      'COMBO_CHIP_MAKE="\\"$COMBO_CHIP\\""' in text)
+check("combo chip comes from the kernel's own config, not a literal",
+      "kcfg_value() {" in text and "include/config/auto.conf" in text)
+check("MTK_PLATFORM is derived with a non-empty fallback",
+      'MTK_PLATFORM_VALUE=$(unq "$(kcfg_value CONFIG_MTK_PLATFORM' in text
+      and "MTK_PLATFORM_VALUE=mt6761" in text)
+check("MTK_PLATFORM is passed to the common module build",
+      bool(re.search(r"build_mod common[\s\S]{0,160}?MTK_PLATFORM=\"\$MTK_PLATFORM_VALUE\"",
+                     text)))
+
+# (b) Gate #1 (chip file compiled) must sit between build_mod common and the
+#     next module, so its failure is attributed to common's own build.
+_i_bc = next((li for li, d in _builds if d == "common"), None)
+_i_bw = next((li for li, d in _builds if d == "wlan"), None)
+_i_g1 = next((i for i, l in enumerate(_logical)
+              if "WMT IC-ops provider is in the link" in l), None)
+check("mt6761.o presence gate runs after build_mod common and before wlan",
+      None not in (_i_bc, _i_g1, _i_bw) and _i_bc < _i_g1 < _i_bw,
+      "common@%s gate@%s wlan@%s" % (_i_bc, _i_g1, _i_bw))
+
+# (c) Gate #2 must inspect the SHIPPED bytes, i.e. run after `strip -g`, and must
+#     go through the symbol table (string counting cannot distinguish a
+#     surviving __weak body from an overridden one).
+_i_g2 = next((i for i, l in enumerate(_logical)
+              if "IC-ops linkage gate" in l), None)
+check("IC-ops symbol gate runs after the strip (gates the shipped .ko)",
+      None not in (_i_g2, _i_strip) and _i_strip < _i_g2,
+      "strip@%s gate@%s" % (_i_strip, _i_g2))
+check("IC-ops gate goes through port/elf_symbols.py",
+      _i_g2 is not None
+      and "elf_symbols.py" in "\n".join(_logical[_i_g2 + 1: _i_g2 + 3]),
+      "next lines: %s" % (_logical[_i_g2 + 1: _i_g2 + 3] if _i_g2 is not None else None))
+
+# (d) The two regexes the gate relies on, tested against real symbol lines.
+_rx = re.findall(r"grep -qE '(\^  (?:mtk_wcn_get_consys_ic_ops|consys_ic_ops)[^']+)'", text)
+check("both gate regexes are present", len(_rx) == 2, "found %d" % len(_rx))
+if len(_rx) == 2:
+    rx_icops, rx_table = re.compile(_rx[0]), re.compile(_rx[1])
+    STRONG = ("  mtk_wcn_get_consys_ic_ops                      "
+              "GLOBAL FUNC    1     0x3f20       24")
+    WEAKLINE = ("  mtk_wcn_get_consys_ic_ops                      "
+                "WEAK   FUNC    1     0x71a0       68")
+    TABLE = ("  consys_ic_ops                                  "
+             "GLOBAL OBJECT  3     0x110        172")
+    check("gate matches a STRONG provider", bool(rx_icops.match(STRONG)), STRONG.strip())
+    check("gate rejects the __weak stub", not rx_icops.match(WEAKLINE), WEAKLINE.strip())
+    check("gate matches the IC ops table", bool(rx_table.match(TABLE)), TABLE.strip())
+
+# (e) Functional test of the symbol parser on a real module, plus a negative
+#     control on the pre-fix artifact when it is still on disk.
+SYMBOLS = ROOT / "port" / "elf_symbols.py"
+STOCK = ROOT / "port" / "_device_backup" / "modules_stock" / "wmt_drv.ko"
+if not SYMBOLS.exists() or not STOCK.exists():
+    print("   SKIP (need port/elf_symbols.py and the stock vendor module)")
+else:
+    r = subprocess.run([EXE, str(SYMBOLS), str(STOCK),
+                        "--grep", r"^mtk_wcn_get_consys_ic_ops$|^consys_ic_ops$"],
+                       capture_output=True, text=True)
+    check("elf_symbols.py reads ELF32 and finds the stock strong provider",
+          r.returncode == 0 and "GLOBAL FUNC" in r.stdout
+          and re.search(r"^  consys_ic_ops\s+GLOBAL OBJECT", r.stdout, re.M) is not None,
+          (r.stdout + r.stderr).strip().replace("\n", " | ")[:160])
+    PRE = (ROOT / "_ci" / "37190391324" / "kernel" / "out-archytas"
+           / "connectivity-modules" / "wmt_drv.ko")
+    if not PRE.exists():
+        print("   SKIP negative control (pre-fix artifact not downloaded)")
+    else:
+        r = subprocess.run([EXE, str(SYMBOLS), str(PRE),
+                            "--grep", r"^mtk_wcn_get_consys_ic_ops$|^consys_ic_ops$"],
+                           capture_output=True, text=True)
+        out = r.stdout
+        check("negative control: the pre-fix build shows WEAK + no IC ops table",
+              "WEAK" in out and re.search(r"^  consys_ic_ops\s", out, re.M) is None,
+              out.strip().replace("\n", " | ")[:160])
 
 print("\n================ %s ================" % (
     "ALL CHECKS PASS" if not failures else "FAILURES: " + ", ".join(failures)))

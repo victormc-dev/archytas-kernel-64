@@ -31,6 +31,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PORT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # Normalize KROOT/KOUT to ABSOLUTE paths. Kbuild resolves O= relative to the
 # directory entered via 'make -C $KROOT', so a relative O= would be re-based as
 # $KROOT/$KOUT (e.g. kernel/kernel/out-archytas) and the prebuilt .config there
@@ -363,7 +364,7 @@ done
 # kernel is built at all) and keeps the source-consistency gate below meaningful.
 echo ">> allow ADRP relocations in arch/arm64/kernel/module.c"
 MODULE_C="$KROOT/arch/arm64/kernel/module.c"
-python3 "$(dirname "${BASH_SOURCE[0]}")/patch_adrp_reloc.py" "$KROOT"
+python3 "$PORT/patch_adrp_reloc.py" "$KROOT"
 if ! grep -q "ARCHYTAS_ADRP_RELOC" "$MODULE_C"; then
   echo "ERROR: ADRP relocation patch did not apply; modules with ADRP would be rejected"
   exit 1
@@ -378,6 +379,85 @@ echo ">> modules_prepare"
 make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
      HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" \
      KCFLAGS="-Wno-error" modules_prepare -j"$JOBS"
+
+# ---- 3b. Resolve the two make variables common/Makefile needs ---------------
+# THIS IS THE Wi-Fi FIX.  common/Makefile gates its chip file on a pattern that
+# carries LITERAL DOUBLE QUOTES:
+#
+#   ifneq ($(filter "CONSYS_%",$(CONFIG_MTK_COMBO_CHIP)),)          # line 198
+#   $(MODULE_NAME)-objs += common_main/platform/$(MTK_PLATFORM).o   # line 199
+#   endif
+#
+# CONFIG_MTK_COMBO_CHIP is a Kconfig *string* symbol
+# (drivers/misc/mediatek/connectivity/Kconfig:128, default "CONSYS_6761" if
+# MTK_COMBO_CHIP_CONSYS_6761), and Kconfig writes string values WITH their
+# quotes, so the module sees the 12-character word
+#     "CONSYS_6761"
+# and the quoted pattern matches.  This script used to override it on the make
+# command line with a BARE `CONSYS_6761` -- and a command-line variable beats
+# auto.conf -- so every one of those quoted tests failed and three things were
+# switched off at once:
+#     - common_main/platform/mt6761.o      the WMT IC-ops provider (line 199)
+#     - -D MTK_WCN_SOC_CHIP_SUPPORT        (line 113, same quoted pattern)
+#     - -D MTK_WCN_WLAN_GEN2               (line 139, same quoted pattern)
+#
+# Without mt6761.o the link keeps the __weak NULL stub from mtk_wcn_consys_hw.c
+#     P_WMT_CONSYS_IC_OPS __weak mtk_wcn_get_consys_ic_ops(VOID)
+#     { WMT_PLAT_PR_WARN("Does not support on combo\n"); return NULL; }
+# so `wmt_consys_ic_ops` stays NULL and the first platform probe dereferences it:
+#     mtk_wmt_probe() -> wmt_consys_ic_ops->consys_ic_need_store_pdev  (offset 0)
+# -> kernel panic, ESR 96000005, x0=x1=x2=0 -- on the real device, as soon as the
+# vendor userspace wmt_loader drives mtk_wcn_consys_hw_init().
+#
+# Evidence, by SYMBOL TABLE (port/elf_symbols.py).  Counting strings cannot tell
+# the two builds apart: a module link is `ld -r`, so a __weak body survives as
+# dead code and its log string stays in .rodata either way.
+#     stock vendor 32-bit wmt_drv.ko : mtk_wcn_get_consys_ic_ops GLOBAL, 24 B
+#                                      consys_ic_ops              GLOBAL, 172 B
+#     ours, before this fix          : mtk_wcn_get_consys_ic_ops WEAK,   68 B
+#                                      consys_ic_ops              ABSENT
+#
+# So derive the value from the kernel's own view instead of inventing it, and
+# keep the quotes.  Both sources are consulted because auto.conf is the build's
+# view while .config is what the defconfig actually wrote.
+kcfg_value() {
+  local f v
+  for f in "$KOUT/include/config/auto.conf" "$KOUT/.config"; do
+    [ -f "$f" ] || continue
+    v=$(sed -n "s/^$1=//p" "$f" | tail -1)
+    [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+  done
+  return 1
+}
+# Strip one layer of surrounding double quotes -- the same idiom the kernel uses,
+# e.g. arch/arm64/Makefile: `MTK_PLATFORM := $(CONFIG_MTK_PLATFORM:"%"=%)`.
+unq() { local s="$1"; s="${s#\"}"; s="${s%\"}"; printf '%s' "$s"; }
+
+COMBO_RAW=$(kcfg_value CONFIG_MTK_COMBO_CHIP || true)
+COMBO_CHIP=$(unq "$COMBO_RAW")
+if [ -z "$COMBO_CHIP" ]; then
+  echo "WARN: CONFIG_MTK_COMBO_CHIP not found in $KOUT/.config or its auto.conf;"
+  echo "      falling back to CONSYS_6761 (this device's only combo chip)"
+  COMBO_CHIP=CONSYS_6761
+fi
+# Put the quotes back: common/Makefile's filter patterns include them, and a
+# bare word silently disables the chip file again (the bug this block documents).
+COMBO_CHIP_MAKE="\"$COMBO_CHIP\""
+
+# MTK_PLATFORM normally arrives for free: arch/arm64/Makefile:138-140 does
+#   MTK_PLATFORM := $(CONFIG_MTK_PLATFORM:"%"=%)
+#   export MTK_PLATFORM ...
+# and that Makefile is included even for an M= build (top-level Makefile:648 is
+# outside the KBUILD_EXTMOD branches).  Re-assert it anyway so a change in that
+# plumbing cannot silently re-open the hole -- an empty MTK_PLATFORM would turn
+# line 199 into `common_main/platform/.o`, a hard Kbuild error.
+MTK_PLATFORM_VALUE=$(unq "$(kcfg_value CONFIG_MTK_PLATFORM || true)")
+[ -n "$MTK_PLATFORM_VALUE" ] || MTK_PLATFORM_VALUE=mt6761
+
+echo "== common/Makefile variables =="
+echo "   CONFIG_MTK_COMBO_CHIP = $COMBO_CHIP_MAKE   (quotes are REQUIRED)"
+echo "   MTK_PLATFORM          = $MTK_PLATFORM_VALUE"
+[ "$COMBO_CHIP" = "CONSYS_6761" ] || echo "   NOTE: combo chip is '$COMBO_CHIP', not CONSYS_6761 -- is the defconfig right?"
 
 # ---- 4. Build each connectivity module -------------------------------------
 # KBUILD_MODPOST_FAIL_ON_WARNINGS is forced 'y' by the WMT Makefile; some symbols
@@ -535,8 +615,25 @@ collect_mod() {
 # descendants, because build_mod() wipes the module's whole build directory.
 # 'wlan' therefore comes BEFORE 'wlan/adaptor'; the reverse order is exactly
 # what destroyed the adaptor module in run #37189514054.
-build_mod common  CONFIG_MTK_COMBO_CHIP=CONSYS_6761
+build_mod common  CONFIG_MTK_COMBO_CHIP="$COMBO_CHIP_MAKE" \
+                    MTK_PLATFORM="$MTK_PLATFORM_VALUE"
 collect_mod common
+
+# Gate #1: the chip file MUST have been compiled. This is the precise symptom of
+# the quoted-pattern bug documented in step 3b, and catching it here names the
+# cause instead of leaving a puzzling NULL dereference for the device to find.
+# (`${PLAT}.o` is mt6761.o: the IC ops table + the strong
+# mtk_wcn_get_consys_ic_ops that overrides the __weak stub.)
+if [ -f "$KOUT/$CONN/common/common_main/platform/$MTK_PLATFORM_VALUE.o" ]; then
+  echo "   OK: $MTK_PLATFORM_VALUE.o compiled (WMT IC-ops provider is in the link)"
+else
+  echo "ERROR: $KOUT/$CONN/common/common_main/platform/$MTK_PLATFORM_VALUE.o missing."
+  echo "       common/Makefile:198-199 gate it on \$(filter \"CONSYS_%\",\$(CONFIG_MTK_COMBO_CHIP))"
+  echo "       -- the value must keep its Kconfig quotes (see step 3b). Without this"
+  echo "       object the module keeps the __weak mtk_wcn_get_consys_ic_ops stub and"
+  echo "       mtk_wmt_probe() panics on a NULL wmt_consys_ic_ops."
+  exit 1
+fi
 
 # MTK_ANDROID_WMT=y is REQUIRED here. This SoC uses the legacy WMT glue, not
 # conninfra, so CFG_SUPPORT_CONNINFRA is forced to 0. But gl_rst.c/axi.c compile
@@ -556,10 +653,10 @@ build_mod wlan    MTK_COMBO_CHIP=MT6761 \
                     CONFIG_WLAN_DRV_BUILD_IN=n
 collect_mod wlan
 
-build_mod wlan/adaptor CONFIG_MTK_COMBO_CHIP=CONSYS_6761
+build_mod wlan/adaptor CONFIG_MTK_COMBO_CHIP="$COMBO_CHIP_MAKE"
 collect_mod wlan/adaptor
 
-build_mod bt      CONFIG_MTK_COMBO_CHIP=CONSYS_6761
+build_mod bt      CONFIG_MTK_COMBO_CHIP="$COMBO_CHIP_MAKE"
 collect_mod bt
 
 # ---- 5. Rename + verify the four modules -----------------------------------
@@ -667,6 +764,29 @@ if [ -n "$_missing" ]; then
   exit 1
 fi
 echo "   OK: all 4 connectivity modules present."
+
+# Gate #2: the WMT IC-ops provider must be a STRONG symbol in the SHIPPED bytes.
+# A surviving __weak stub is not a cosmetic warning -- it IS the NULL-deref panic
+# (see step 3b), so the build fails here rather than on the device.
+#
+# Read AFTER the strip: `-g` (--strip-debug) keeps .symtab, so what is inspected
+# is exactly what gets pushed to /data/local/tmp and insmod'ed.
+echo "=== IC-ops linkage gate (must be GLOBAL, not WEAK) ==="
+_sym=$(python3 "$PORT/elf_symbols.py" "$OUTDIR/wmt_drv.ko" \
+       --grep '^mtk_wcn_get_consys_ic_ops$|^consys_ic_ops$' 2>&1) || true
+printf '%s\n' "$_sym"
+if printf '%s\n' "$_sym" | grep -qE '^  mtk_wcn_get_consys_ic_ops +GLOBAL +FUNC' \
+   && printf '%s\n' "$_sym" | grep -qE '^  consys_ic_ops +GLOBAL +OBJECT'; then
+  echo "   OK: strong mtk_wcn_get_consys_ic_ops + consys_ic_ops are linked in."
+  echo "       -> mtk_wmt_probe() can no longer dereference a NULL wmt_consys_ic_ops."
+else
+  echo "ERROR: wmt_drv.ko still carries the __weak NULL stub instead of the"
+  echo "       mt6761 IC ops. Loading it would panic the device on the first"
+  echo "       platform probe (mtk_wmt_probe -> NULL wmt_consys_ic_ops)."
+  echo "       Re-check step 3b: CONFIG_MTK_COMBO_CHIP must be quoted, and"
+  echo "       common_main/platform/$MTK_PLATFORM_VALUE.o must be in the link."
+  exit 1
+fi
 
 # Hard gate for the ONLY thing that makes those modules loadable: the target
 # kernel must carry the ADRP relocation fix from step 2e. Shipping .ko files that
