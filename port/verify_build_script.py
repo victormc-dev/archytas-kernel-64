@@ -15,7 +15,12 @@ downloaded CI artifact; those skip cleanly when absent). Checks:
   5. the workflow applies that patch BEFORE it builds the kernel -- otherwise
      the boot image ships with the unpatched module loader (silent: the build
      goes green and insmod still fails on the device).
-  6. the `.modinfo` extractor reads name=/vermagic= out of a real .ko.
+  6. module build order + immediate collection. build_mod() wipes the module's
+     whole build directory, and 'wlan' is an ancestor of 'wlan/adaptor' -- so
+     building the ancestor last DELETES an already-linked module, and a
+     collect-at-the-end sweep then cannot find it. That was run #37189514054:
+     wmt_chrdev_wifi.ko linked fine at 08:47:34, gone by the 08:48:14 find.
+  7. the `.modinfo` extractor reads name=/vermagic= out of a real .ko.
 
 The Bash tool rewrites backslashes inside heredocs, so running snippets
 straight from a shell command line is unreliable -- hence this harness.
@@ -35,6 +40,13 @@ WORKFLOW = ROOT / ".github" / "workflows" / "build.yml"
 SRC = ROOT / "archimedes-kernel-64-main" / "arch" / "arm64" / "kernel" / "module.c"
 ART = ROOT / "archytas-wifi-boot-and-modules" / "kernel" / "out-archytas" / "connectivity-modules"
 EXE = sys.executable
+
+# Optional: point the shell-script checks at a different copy, e.g. an older
+# revision, to prove they actually fail on the bug they are meant to catch:
+#   git show HEAD:port/build_connectivity_modules.sh > /tmp/old.sh
+#   python3 port/verify_build_script.py /tmp/old.sh
+if len(sys.argv) > 1:
+    SCRIPT = Path(sys.argv[1])
 
 failures = []
 
@@ -136,7 +148,77 @@ try:
 except ImportError:
     print("   SKIP (pyyaml not installed)")
 
-print("\n== 6. .modinfo extractor on real artifacts ==")
+print("\n== 6. module build order + immediate collection ==")
+# Logical lines: drop comments, join backslash continuations. The `build_mod
+# wlan` invocation spans 5 physical lines, so physical-line scanning is wrong.
+_logical = []
+_buf = ""
+for _ln in text.splitlines():
+    _s = _ln.split("#", 1)[0] if _ln.lstrip().startswith("#") else _ln
+    if not _buf and not _s.strip():
+        continue
+    if _buf and _s.lstrip().startswith("#"):
+        continue
+    _buf += _s
+    if _buf.rstrip().endswith("\\"):
+        _buf = _buf.rstrip()[:-1]
+        continue
+    _logical.append(_buf.strip())
+    _buf = ""
+
+_builds = [(i, l.split()[1]) for i, l in enumerate(_logical) if l.startswith("build_mod ")]
+_collects = [(i, l.split()[1]) for i, l in enumerate(_logical) if l.startswith("collect_mod ")]
+_order = [d for _, d in _builds]
+print("   build_mod order : %s" % " -> ".join(_order))
+print("   collect_mod     : %s" % " -> ".join(d for _, d in _collects))
+
+check("all four modules are built",
+      sorted(_order) == sorted(["common", "wlan", "wlan/adaptor", "bt"]),
+      "got %s" % _order)
+
+# (a) every build must be immediately followed by its own collect_mod, before
+#     the next build starts. Otherwise a later ancestor wipe can still lose it.
+_missing_collect = []
+for k, (bi, bd) in enumerate(_builds):
+    nxt = _builds[k + 1][0] if k + 1 < len(_builds) else len(_logical)
+    own = [ci for ci, cd in _collects if cd == bd and bi < ci < nxt]
+    if not own:
+        _missing_collect.append(bd)
+check("each module is collected right after it is built", not _missing_collect,
+      "no collect_mod before the next build_mod for: %s" % _missing_collect)
+
+# (b) an ancestor directory must be built before its descendants, because
+#     build_mod() wipes the whole directory. 'wlan' must precede 'wlan/adaptor'.
+_bad_pairs = []
+for i, a in enumerate(_order):
+    for j, b in enumerate(_order):
+        if a != b and b.startswith(a + "/") and j < i:
+            _bad_pairs.append("%s built after %s" % (a, b))
+check("ancestor modules are built before their descendants", not _bad_pairs,
+      "; ".join(_bad_pairs))
+
+# (c) OUTDIR must be wiped before the first build, or a stale .ko from an
+#     earlier local run would satisfy the "all four present" assertion.
+_outdir_def = next((i for i, l in enumerate(_logical)
+                    if l.startswith('OUTDIR="$KOUT/connectivity-modules"')), None)
+_wipe = next((i for i, l in enumerate(_logical) if l.startswith('rm -rf "$OUTDIR"')), None)
+_first_build = _builds[0][0] if _builds else None
+check("OUTDIR is defined and cleaned before the first build",
+      None not in (_outdir_def, _wipe, _first_build)
+      and _outdir_def < _wipe < _first_build,
+      "define=%s wipe=%s first build=%s" % (_outdir_def, _wipe, _first_build))
+
+# (d) the artifact assertion must name all four, and the rename step must not be
+#     able to mistake a previously renamed file for the freshly built module.
+_want = re.search(r"for _want in ([^;]+); do", text)
+check("artifact assertion covers all four modules",
+      bool(_want) and set(_want.group(1).split()) >=
+      {"wmt_drv", "wmt_chrdev_wifi", "bt_drv", "wlan_drv_gen4m"},
+      _want.group(1).strip() if _want else "not found")
+check("rename step skips an already-renamed wlan_drv_gen4m.ko",
+      "case \"$_cand\" in *'/wlan_drv_gen4m.ko') continue" in text)
+
+print("\n== 7. .modinfo extractor on real artifacts ==")
 mm = re.search(r"python3 - \"\$m\" <<'PY'\n(.*?)\nPY\n", text, re.S)
 kos = sorted(ART.glob("*.ko")) if ART.exists() else []
 if not mm or not kos:

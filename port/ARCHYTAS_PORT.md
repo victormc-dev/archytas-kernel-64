@@ -269,12 +269,55 @@ mtk reset
 > 「整个 `__versions` 段缺失」才会失败。modpost 的未定义符号报错也已被
 > `KBUILD_MODPOST_FAIL_ON_WARNINGS=`（`scripts/Makefile.modpost:81` 据此加 `-w`）压掉。
 
-### 8.5 本地校验工具
+### 8.5 收集顺序：`rm -rf` 把子模块吃掉了（run #37189514054）
 
-- `port/verify_build_script.py`：改脚本后**先跑它**。含 6 组检查：`bash -n`；
+第四个坑，也是**我自己引入的**，而且是最隐蔽的一个：日志显示四个模块**全部链接成功**，
+脚本最后仍然 `ERROR: missing connectivity modules: wmt_chrdev_wifi.ko`。
+
+时间线（同一份日志）：
+
+| 时刻 | 事件 |
+| --- | --- |
+| 08:47:34.44 | `wmt_chrdev_wifi.ko` 的 MODPOST 未定义符号警告（说明它被链接了） |
+| 08:47:34.59 | 进入 `build_mod wlan` —— 该函数第一件事是 `rm -rf "$KOUT/$CONN/wlan"` |
+| 08:48:14.45 | `find "$KOUT" -name '*.ko'` 只剩 **5** 个：`connectivity-modules/{bt_drv,wmt_drv}.ko`、`.../bt/bt_drv.ko`、`.../common/wmt_drv.ko`、`.../wlan/wlan_mt6761_axi.ko` |
+| 08:48:14.56 | `ERROR: missing connectivity modules: wmt_chrdev_wifi.ko` |
+
+根因：`wlan/adaptor` **是 `wlan` 的子目录**，而 `build_mod()` 为了强制丢弃陈旧 `.o`
+（防止 `-mcmodel=large` 变更被缓存掩盖）会 `rm -rf "$KOUT/$CONN/$d"`。
+原来调用顺序是 `common → wlan/adaptor → bt → wlan`，最后那次 `build_mod wlan`
+把第 2 步刚编好、还没来得及收集的 `adaptor/wmt_chrdev_wifi.ko` 连锅端掉；
+随后重建的 `wlan/` 里不再有 `adaptor/`，而末尾的 `find` 扫描自然什么也找不到。
+
+> 也就是说：**这一步不是"没编出来"，是"编出来了又被自己删了"**。日志里
+> `LD [M] …/wmt_chrdev_wifi.ko` 存在、而 41 秒后文件不存在 —— 只看构建输出永远查不出来。
+
+修复（两层，缺一不可）：
+
+1. **编完立刻收集**：新增 `collect_mod()`，在每个 `build_mod` 之后立即把该目录下的 `.ko`
+   拷进 `$OUTDIR`（`$KOUT/connectivity-modules`，**位于 `$KOUT/$CONN` 之外**，不在任何 wipe 范围内）。
+   结果与构建顺序**解耦**。
+2. **父目录先于子目录**：调用顺序改为 `common → wlan → wlan/adaptor → bt`，
+   并在 `build_mod()` 的 `rm -rf` 上方写明 HAZARD。
+
+顺带修掉两个同源隐患：
+
+- `$OUTDIR` 在构建前 `rm -rf` + 重建，避免**上次本地残留的 `.ko`** 让"四件套齐全"断言假通过。
+  并加了一道 `case "$OUTDIR" in "$KOUT"/*)` 的护栏，拒绝清 `$KOUT` 之外的路径。
+- 末尾识别 wlan-core 的 `find | head -1` 换成 **glob 循环**（同一个 pipefail/SIGPIPE 陷阱），
+  并显式跳过已重命名的 `wlan_drv_gen4m.ko`，避免把上一轮的产物当成新编的模块。
+
+### 8.6 本地校验工具
+
+- `port/verify_build_script.py`：改脚本后**先跑它**。含 7 组检查：`bash -n`；
   **禁止无兜底的 `| head` 管道**（脚本是 `set -euo pipefail`，`find|head` 的 SIGPIPE 141 会被当成致命失败 ——
   这正是 run #37186797793 在第一个模块后静默 exit 1 的原因）；逐个内嵌 python 的 AST 校验；
   用真实内核源码跑 `patch_adrp_reloc.py`（含幂等 + 反向用例）；**校验 workflow 里补丁步骤排在内核构建之前**；
+  **校验模块构建顺序 + 立即收集不变量**（父目录先于子目录、每个 `build_mod` 后紧跟自己的 `collect_mod`、
+  `OUTDIR` 在首次构建前被清理）；用真实 `.ko` 跑 `.modinfo` 提取器。
+  支持 `python3 port/verify_build_script.py <别的脚本副本>` 做**反向验证**——
+  例如 `git show HEAD:port/build_connectivity_modules.sh > /tmp/old.sh` 再跑，应当报出
+  `wlan built after wlan/adaptor`，据此确认检查本身有效。
   用真实 `.ko` 跑 `.modinfo` 提取器。
 - `port/ci_logs.py`：直接拉 GitHub Actions 日志（凭据取自 git credential manager，不打印）。
   `--list` 列 run；默认取最近一个失败 run，打印失败步骤名 + 日志尾部 + 关键行命中。

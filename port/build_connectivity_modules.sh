@@ -391,22 +391,38 @@ build_mod() {
   # folded into KBUILD_CFLAGS for all module compiles regardless of how the
   # module's -objs are laid out across subdirectories.
   #
-  # -mcmodel=large is MANDATORY on this kernel. The running kernel has
-  #   CONFIG_ARM64_ERRATUM_843419=y (Cortex-A53 erratum), which makes
-  #   arch/arm64/kernel/module.c compile OUT the handlers for the ADRP
-  #   relocations R_AARCH64_ADR_PREL_PG_HI21/_NC (275/276):
-  #       #ifndef CONFIG_ARM64_ERRATUM_843419
-  #           case R_AARCH64_ADR_PREL_PG_HI21: ...
-  #   and arch/arm64/Kconfig expects modules to be built with -mcmodel=large
-  #   ("builds modules using the large memory model in order to avoid the use
-  #   of the ADRP instruction"). arch/arm64/Makefile is supposed to inject it
-  #   via KBUILD_CFLAGS_MODULE, but the out-of-tree (M=) build here does not
-  #   pick that up, so the modules were linked with ~9000 ADRP relocations and
-  #   insmod failed with:
-  #       module wmt_drv: unsupported RELA relocation: 275
-  #   Pass it explicitly. Verified after the build by check_no_adrp() below.
+  # -mcmodel=large: correct to pass, but NOT sufficient, and NOT the fix.
+  #
+  # The running kernel has CONFIG_ARM64_ERRATUM_843419=y (Cortex-A53 erratum),
+  # which selects CONFIG_ARM64_MODULE_CMODEL_LARGE and makes
+  # arch/arm64/kernel/module.c compile OUT the handlers for the ADRP
+  # relocations R_AARCH64_ADR_PREL_PG_HI21/_NC (275/276):
+  #     #ifndef CONFIG_ARM64_ERRATUM_843419
+  #         case R_AARCH64_ADR_PREL_PG_HI21: ...
+  # so any module still carrying one of those relocations is rejected by insmod:
+  #     module wmt_drv: unsupported RELA relocation: 275   (then -ENOEXEC)
+  #
+  # arch/arm64/Makefile injects -mcmodel=large through KBUILD_CFLAGS_MODULE.
+  # Reading DW_AT_producer back out of the built .ko proves it genuinely reaches
+  # cc1 even for this out-of-tree (M=) build -- earlier claims that KCFLAGS or
+  # ccflags-y were being dropped were WRONG. And it still does not help:
+  # -mcmodel=large only changes how GCC addresses *symbols*; the 161 ADRP in
+  # bt_drv.ko (197 in wmt_chrdev_wifi.ko) all target the .text SECTION symbol
+  # with a small, 8-byte-aligned addend right after each function body -- i.e.
+  # GCC's in-function literal pools, which the large memory model never removes.
+  #
+  # The actual fix is kernel-side and lives in step 2e:
+  # port/patch_adrp_reloc.py removes the #ifndef guard so the loader relocates
+  # ADRP again. We keep passing the flag explicitly because it is what the
+  # Kconfig intends for modules, and report_relocs() prints the count so a
+  # codegen regression cannot hide.
+  #
   # Always rebuild: a cached/pre-existing .o would keep stale codegen and silently
   # defeat the -mcmodel=large change (that is exactly what fooled build #14/#15).
+  #
+  # HAZARD: this wipes the module's whole build directory, so 'wlan' also
+  # destroys 'wlan/adaptor'. Callers must therefore build an ancestor BEFORE its
+  # descendants and collect each .ko immediately (see collect_mod).
   rm -rf "$KOUT/$CONN/$d"
   make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
        HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" \
@@ -482,9 +498,46 @@ PY
 }
 
 
+# Where the four .ko are gathered. Defined BEFORE the builds because
+# collect_mod() copies each module out the instant it has been linked.
+OUTDIR="$KOUT/connectivity-modules"
+# Refuse to wipe anything that is not a plain subdirectory of the build output.
+case "$OUTDIR" in
+  "$KOUT"/*) : ;;
+  *) echo "ERROR: refusing to clean OUTDIR outside KOUT: $OUTDIR"; exit 1 ;;
+esac
+# Start clean: a stale .ko left behind by an earlier local run would otherwise
+# satisfy the "all four present" assertion without having been rebuilt at all.
+rm -rf "$OUTDIR"
+mkdir -p "$OUTDIR"
+
+# Copy a module's freshly linked .ko out of its build directory, immediately.
+#
+# Why not one sweep at the very end: build_mod() wipes $KOUT/$CONN/<dir> to
+# force a clean rebuild, and 'wlan' is an ANCESTOR of 'wlan/adaptor'. With the
+# sweep only at the end, the final 'build_mod wlan' deleted the adaptor module
+# that had just been linked -- that is run #37189514054: wmt_chrdev_wifi.ko was
+# linked at 08:47:34 and gone by the 08:48:14 find, ending in
+# "ERROR: missing connectivity modules: wmt_chrdev_wifi.ko" even though the log
+# showed a successful LD [M] for it. Copying into OUTDIR, which lives outside
+# $KOUT/$CONN, makes the collected set independent of build order.
+collect_mod() {
+  local d="$1" f n=0
+  while IFS= read -r f; do
+    cp -f "$f" "$OUTDIR/"
+    echo "   collected $(basename "$f")"
+    n=$((n + 1))
+  done < <(find "$KOUT/$CONN/$d" -type f -name '*.ko' -print 2>/dev/null)
+  [ "$n" -gt 0 ] || echo "   WARN: no .ko found under $KOUT/$CONN/$d"
+}
+
+# BUILD ORDER MATTERS: an ancestor directory must be built before its
+# descendants, because build_mod() wipes the module's whole build directory.
+# 'wlan' therefore comes BEFORE 'wlan/adaptor'; the reverse order is exactly
+# what destroyed the adaptor module in run #37189514054.
 build_mod common  CONFIG_MTK_COMBO_CHIP=CONSYS_6761
-build_mod wlan/adaptor CONFIG_MTK_COMBO_CHIP=CONSYS_6761
-build_mod bt      CONFIG_MTK_COMBO_CHIP=CONSYS_6761
+collect_mod common
+
 # MTK_ANDROID_WMT=y is REQUIRED here. This SoC uses the legacy WMT glue, not
 # conninfra, so CFG_SUPPORT_CONNINFRA is forced to 0. But gl_rst.c/axi.c compile
 # their WMT code whenever CFG_SUPPORT_CONNINFRA==0 (NOT additionally gated on
@@ -501,8 +554,19 @@ build_mod wlan    MTK_COMBO_CHIP=MT6761 \
                     CONFIG_MTK_COMBO_WIFI_HIF=axi \
                     CONFIG_MTK_COMBO_WIFI=m \
                     CONFIG_WLAN_DRV_BUILD_IN=n
+collect_mod wlan
 
-# ---- 5. Collect the four modules -------------------------------------------
+build_mod wlan/adaptor CONFIG_MTK_COMBO_CHIP=CONSYS_6761
+collect_mod wlan/adaptor
+
+build_mod bt      CONFIG_MTK_COMBO_CHIP=CONSYS_6761
+collect_mod bt
+
+# ---- 5. Rename + verify the four modules -----------------------------------
+# All four .ko were already copied into $OUTDIR by collect_mod(), the moment
+# each one was linked. Nothing is swept up here any more: a late sweep is what
+# silently lost a module (see collect_mod).
+#
 # The wlan-core module name is DERIVED by its own Makefile, NOT fixed:
 #   MODULE_NAME := wlan_<lower(WLAN_CHIP_ID)>_<CONFIG_MTK_COMBO_WIFI_HIF>
 #   WLAN_CHIP_ID = $(word 1, $(MTK_COMBO_CHIP))
@@ -510,25 +574,27 @@ build_mod wlan    MTK_COMBO_CHIP=MT6761 \
 #   wlan_mt6761_axi.ko          (note the 'mt' prefix: lower('MT6761')='mt6761')
 # The old hardcoded 'wlan_6761_axi.ko' never matched, so this step silently
 # dropped the main Wi-Fi driver and the artifact shipped with only 3 of 4 .ko.
-# Match any wlan_*.ko (chipid-agnostic) and FAIL LOUDLY when it is missing.
-OUTDIR="$KOUT/connectivity-modules"
-mkdir -p "$OUTDIR"
-find "$KOUT" "$KROOT/$CONN" -name 'wmt_drv.ko'        -exec cp -f {} "$OUTDIR/" \;
-find "$KOUT" "$KROOT/$CONN" -name 'wmt_chrdev_wifi.ko' -exec cp -f {} "$OUTDIR/" \;
-find "$KOUT" "$KROOT/$CONN" -name 'bt_drv.ko'         -exec cp -f {} "$OUTDIR/" \;
-
+# The vendor init.rc insmods it by the hardcoded path .../wlan_drv_gen4m.ko, so
+# rename it; the module's real identity stays in .modinfo, which the dump below
+# prints. FAIL LOUDLY when it is missing.
 echo "=== debug: every .ko produced under KOUT ==="
 find "$KOUT" -type f -name '*.ko' 2>/dev/null | sort || true
 
-# Same SIGPIPE/pipefail trap as in build_mod: let find stop itself with
-# -print -quit rather than piping into `head -1`. This one has survived only
-# because it normally matches a single file; it is still a latent failure.
-_w=$(find "$KOUT" "$KROOT/$CONN" -type f -name 'wlan_*.ko' -print -quit 2>/dev/null)
+# Glob, not `find | head -1`: this runs under `set -euo pipefail`, where a
+# SIGPIPE on the pipeline would turn a successful match into a fatal error.
+_w=""
+for _cand in "$OUTDIR"/wlan_*.ko; do
+  [ -f "$_cand" ] || continue
+  case "$_cand" in *'/wlan_drv_gen4m.ko') continue ;; esac
+  _w="$_cand"
+  break
+done
 if [ -n "$_w" ]; then
   cp -f "$_w" "$OUTDIR/wlan_drv_gen4m.ko"
   echo "   wlan core module: $(basename "$_w") -> wlan_drv_gen4m.ko"
 else
-  echo "ERROR: wlan core module (wlan_*.ko) not found; expected wlan_mt6761_axi.ko"
+  echo "ERROR: wlan core module (wlan_*.ko) not found in $OUTDIR;"
+  echo "       expected wlan_mt6761_axi.ko -- see the build log above"
   exit 1
 fi
 
