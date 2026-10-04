@@ -12,6 +12,12 @@
 本文档早期版本基于"archimedes 4G 模板 DTB vs Wi-Fi 原厂主 DTB"的抽样对比，得出了**错误**的中间结论（"Wi-Fi 版关了 msdc2/3/dsi_te/rt9465_slave_chr""板级差异在 overlay 全节点"）。
 拿到 **4G 原厂 ROM** 后，做了**原厂对原厂**的权威对比，结论已彻底修正，见第 1 节。
 
+**2026-10-04 追加修正（见第 8 节）**：连通性模块 `insmod` 报 `unsupported RELA relocation: 275`，
+曾两次误判为「`-mcmodel=large` 没进编译命令行」（先后归因于 `KCFLAGS`、`ccflags-y`）。
+实际读 `.ko` 内嵌 `DW_AT_producer` 证明该开关**一直都在**；`-mcmodel=large` 本就消除不了这些
+指向 `.text` 函数内字面量池的 ADRP。真正原因在 `arch/arm64/kernel/module.c` 的
+`#ifndef CONFIG_ARM64_ERRATUM_843419` 守卫，已按第 8.3 节手术式修复。
+
 ---
 
 ## 1. 核心结论（原厂对原厂，权威）
@@ -191,6 +197,77 @@ mtk reset
 - [ ] 物理按键（电源/音量）是否正常（验证 dtbo 是否为 Wi-Fi 原厂）
 - [ ] 是否需要关基带（看内核日志是否有 CCCI/MD1 报错）
 - [ ] LCM 面板是否点亮（黑屏则查 lk atag 与 LCM 驱动列表）
+
+---
+
+## 8. 连通性内核模块（64 位 `.ko`）— 2026-10-04
+
+### 8.1 为什么必须重编
+
+原厂 `/vendor/lib/modules` 下的连通性模块是 **32 位 ARMv7**，`insmod` 进 64 位内核必然
+`Exec format error`。因此 Wi-Fi/BT 要在 64 位内核上可用，必须自建 4 个 **AArch64** 模块：
+
+| 目标文件名 | 来源仓库 @ commit | 说明 |
+| --- | --- | --- |
+| `wmt_drv.ko` | MotorolaMobilityLLC `…connectivity-common` @ `364afcf` | WMT 传输层 |
+| `wmt_chrdev_wifi.ko` | MotorolaMobilityLLC `…connectivity-wlan-adaptor` @ `e84d47e` | WLAN 字符设备 |
+| `wlan_drv_gen4m.ko` | zainarbani `…wlan-core-gen4m` @ `ba2c5a5` | **真实名 `wlan_mt6761_axi.ko`**（`wlan_<chipid>_<hif>` 派生），按原厂命名改名 |
+| `bt_drv.ko` | MotorolaMobilityLLC `…connectivity-bt-mt66xx` @ `9074126` | 蓝牙 |
+
+构建脚本：**`port/build_connectivity_modules.sh`**；真机安装：`port/install_wifi_modules.sh`。
+加载顺序（原厂 `/vendor/etc/init/*.rc`）：`wmt_drv` → `wmt_chrdev_wifi` + `wlan_drv_${ro.vendor.wlan.gen}` + `bt_drv`。
+
+### 8.2 ADRP 重定位：真正的病根（此前两次误判）
+
+现象：`insmod` 报 **`unsupported RELA relocation: 275`** + `Exec format error`。
+
+| 结论 | 证据 |
+| --- | --- |
+| ① `-mcmodel=large` **本来就已经生效** | 直接读 `.ko` 内嵌的 `DW_AT_producer`：`GNU C89 11.4.0 … -mcmodel=large -mabi=lp64 … -fno-pic -fstack-protector-strong`。它由 `CONFIG_ARM64_MODULE_CMODEL_LARGE`（被 `ARM64_ERRATUM_843419` 自动 `select`）经 `arch/arm64/Makefile:81` 的 `KBUILD_CFLAGS_MODULE` 注入 |
+| ② 之前怀疑「KCFLAGS / ccflags-y 没进 cc1」是**错的** | 同一编译前后 `.ko` 字节几乎一致，是因为**该开关压根不消除这些 ADRP** |
+| ③ 这 161 个 ADRP 的真实身份 | 全部指向 **`.text` 节符号本身**（`st_name==0`），addend 小而 8 字节对齐，且**紧跟在每个函数体之后**（如 `BT_poll@0x100+0xd4` → 池在 `0x1d8`），即 GAS 打 `$d` 标记的**函数内字面量池**；成对的 64 位槽由 `R_AARCH64_ABS64(257)` 填充 |
+| ④ 内核为何拒收 | `arch/arm64/kernel/module.c:334` 用 `#ifndef CONFIG_ARM64_ERRATUM_843419` 把 `R_AARCH64_ADR_PREL_PG_HI21(_NC)`（275/276）的处理器**整体编译掉了**（上游设计前提是「大代码模型的模块不含 ADRP」，对这批老 MTK 模块不成立） |
+| ⑤ 相关但非主因 | binutils aarch64 链接器**默认开启** `--fix-cortex-a53-843419`；`arch/arm64/Makefile` 只在「erratum 关闭」分支加 `--no-fix-…`，所以 erratum 开启时模块链接仍做该修补 |
+
+### 8.3 修复（脚本 step 2e，幂等）
+
+改**内核侧**（唯一真正决定权的地方）：去掉 `module.c` 里那对守卫，让 ADRP 重定位正常处理。
+
+- **没有**选「defconfig 关 `CONFIG_ARM64_ERRATUM_843419`」——那会同时把
+  `--fix-cortex-a53-843419` 从 `LDFLAGS_vmlinux` 拿掉，等于**连内核自身的 erratum 规避都放弃**
+  （Cortex-A53 真实硬件缺陷：load/store 可能访问错误地址）。手术式补丁保留内核侧规避，只放宽模块加载策略。
+- 打补丁后 `grep ARCHYTAS_ADRP_RELOC arch/arm64/kernel/module.c` 必须命中；脚本以此作为**硬门禁**。
+
+> ⚠️ **副作用**：改的是内核，所以**必须重新编译并重刷一次 boot 镜像**。此后迭代 `.ko` 用下面的快车道即可。
+
+### 8.4 快车道：只编模块（workflow_dispatch → `modules_only=true`）
+
+慢的一直是 `Image.gz-dtb`（~7–10 min），而脚本本身**从不**编内核。快车道 = 跳过内核步骤，
+由脚本自己 `defconfig`（+关 KernelSU）`+ modules_prepare`：
+
+| 模式 | 做什么 | 耗时 | 产物 |
+| --- | --- | --- | --- |
+| 默认（full） | 内核 `Image.gz-dtb` + 4 个 `.ko` + 打包 boot | ~11 min | `archytas-wifi-boot-and-modules`（含 boot 镜像） |
+| `modules_only=true` | 仅 4 个 `.ko`（自动 `modules_prepare`） | ~3 min | `archytas-wifi-modules-only`（仅 `.ko`） |
+
+改动只在 **`.github/workflows/build.yml`**（`build_stage` 之上的 `modules_only` 输入 + 条件跳过内核/打包/上传）。
+
+产物自检（每轮都打印，便于一轮定位）：
+
+- `report_relocs()`：每个 `.ko` 的 ADRP(275/276) 计数 + 从 `DW_AT_producer` 读出的实际 codegen 开关
+- `modinfo` 段：内部 `name=`、`vermagic=`（本机为 `4.9.117+ SMP preempt mod_unload modversions aarch64`）、`__versions` 条数
+- 断四件套齐全 + 内核补丁存在
+
+> 注：`vermagic` 含 `modversions`（`CONFIG_MODVERSIONS=y`）。快车道没有内核 `Module.symvers`，
+> 所以 `__versions` 会是 **0 条**——`check_version()` 对「未列出的符号」放行（走到
+> “broken toolchain, warn once, return 1” 分支），**仍可 insmod**；只有「列出但 CRC 不符」或
+> 「整个 `__versions` 段缺失」才会失败。modpost 的未定义符号报错也已被
+> `KBUILD_MODPOST_FAIL_ON_WARNINGS=`（`scripts/Makefile.modpost:81` 据此加 `-w`）压掉。
+
+### 8.5 本地校验工具
+
+`port/verify_build_script.py`：`bash -n` + 逐个内嵌 python 脚本 AST 校验 + 用真实内核源码
+跑一遍 step 2e 补丁（含幂等性）+ 用真实 `.ko` 跑 `.modinfo` 提取器。改脚本后先跑它。
 
 ---
 

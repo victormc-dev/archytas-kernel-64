@@ -18,7 +18,15 @@
 #   vendor/mediatek/kernel_modules/connectivity/wlan/adaptor-> wmt_chrdev_wifi.ko
 #   vendor/mediatek/kernel_modules/connectivity/bt          -> bt_drv.ko
 #
-# Usage: bash port/build_connectivity_modules.sh <KERNEL_SRC> <KERNEL_OUT>
+# Usage: bash port/build_connectivity_modules.sh [<KERNEL_SRC> <KERNEL_OUT>]
+#                                        [--modules-only]
+#
+# --modules-only / MODULES_ONLY=1
+#   The fast lane. Use it when the boot image is already built/flashed and you
+#   only need to re-iterate on the four .ko files: it will NOT build the kernel
+#   Image, so a round costs ~2-3 min instead of ~10. If the kernel out-tree is
+#   not prepared yet (no include/generated/autoconf.h) it configures the tree
+#   and runs modules_prepare itself, which is enough for out-of-tree (M=) builds.
 #
 set -euo pipefail
 
@@ -28,21 +36,65 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # $KROOT/$KOUT (e.g. kernel/kernel/out-archytas) and the prebuilt .config there
 # would be missing -> "Configuration file .config not found" at modules_prepare.
 abspath() { ( cd "$(dirname "$1")" 2>/dev/null && echo "$(pwd)/$(basename "$1")" ) || echo "$1"; }
-KROOT="$(abspath "${1:-$ROOT/kernel}")"
-KOUT="$(abspath "${2:-$ROOT/kernel/out-archytas}")"
+
+MODULES_ONLY="${MODULES_ONLY:-0}"
+_pos=()
+for _a in "$@"; do
+  case "$_a" in
+    --modules-only) MODULES_ONLY=1 ;;
+    -h|--help) sed -n '2,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) _pos+=("$_a") ;;
+  esac
+done
+KROOT="$(abspath "${_pos[0]:-$ROOT/kernel}")"
+KOUT="$(abspath "${_pos[1]:-$ROOT/kernel/out-archytas}")"
 CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 CONN="vendor/mediatek/kernel_modules/connectivity"
 AUTOCONF="$KOUT/include/generated/autoconf.h"
+DEFCONFIG=k61v1_64_archytas_defconfig
 
 echo "== build_connectivity_modules =="
 echo "KROOT = $KROOT"
 echo "KOUT  = $KOUT"
 echo "CROSS = $CROSS_COMPILE"
-test -f "$AUTOCONF" || { echo "ERROR: $AUTOCONF missing; build the kernel (modules_prepare) first"; exit 1; }
+echo "MODE  = $([ "$MODULES_ONLY" = 1 ] && echo 'modules-only (fast lane)' || echo 'with-kernel')"
 command -v git  >/dev/null 2>&1 || { echo "ERROR: git required"; exit 1; }
 command -v patch >/dev/null 2>&1 || echo "WARN: patch not found; relying on git apply only"
+
+# ---- 0. Make sure the kernel out-tree is usable for an M= build ------------
+# A full CI run builds Image.gz-dtb first (see .github/workflows/build.yml),
+# which leaves a fully prepared out-tree behind. In --modules-only mode we skip
+# that multi-minute kernel compile, so if the out-tree is cold we configure it
+# and let step 3's `modules_prepare` generate everything an M= build needs.
+prepare_kernel_tree() {
+  local defcfg="$KROOT/arch/arm64/configs/$DEFCONFIG"
+  [ -f "$defcfg" ] || { echo "ERROR: defconfig missing: $defcfg"; exit 1; }
+  echo ">> out-tree is cold -> configuring $DEFCONFIG + modules_prepare"
+  mkdir -p "$KOUT/include"
+  ln -sfn "$KROOT/include/dt-bindings" "$KOUT/include/dt-bindings"
+  make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
+       HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" \
+       "$DEFCONFIG"
+  local KCONFIG="$KROOT/scripts/config"
+  [ -x "$KCONFIG" ] || KCONFIG="perl $KCONFIG"
+  $KCONFIG --file "$KOUT/.config" --disable CONFIG_KSU
+  make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
+       HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" \
+       olddefconfig
+}
+
+if [ ! -f "$AUTOCONF" ]; then
+  if [ "$MODULES_ONLY" = 1 ]; then
+    command -v make >/dev/null 2>&1 || { echo "ERROR: make required"; exit 1; }
+    prepare_kernel_tree
+  else
+    echo "ERROR: $AUTOCONF missing; build the kernel (modules_prepare) first"
+    echo "       (or re-run with --modules-only to prepare the tree here)"
+    exit 1
+  fi
+fi
 
 # ---- 1. Fetch the four pinned external repos -------------------------------
 # Map of abbreviated -> full 40-hex SHAs (fallback if the GitHub API is
@@ -224,6 +276,128 @@ else
   echo "WARN: -Wno-error anchor not found in wlan Makefile; emi_compat.h NOT force-included"
 fi
 
+# ---- 2d. Force the large code model for every connectivity module -----------
+# WHY: the target kernel is built with CONFIG_ARM64_ERRATUM_843419=y
+# (Cortex-A53 erratum), which selects CONFIG_ARM64_MODULE_CMODEL_LARGE and makes
+# arch/arm64/Makefile add KBUILD_CFLAGS_MODULE += -mcmodel=large. That flag IS
+# reaching cc1 out of the box -- verified from the DW_AT_producer string baked
+# into the shipped .ko:
+#     GNU C89 11.4.0 -mlittle-endian -mgeneral-regs-only -mcmodel=large
+#       -mabi=lp64 -g -O2 -std=gnu90 -fno-strict-aliasing -fno-common
+#       -fno-asynchronous-unwind-tables -fno-pic -fstack-protector-strong ...
+# so `-mcmodel=large` is a belt-and-braces re-assertion here, NOT the fix (an
+# earlier revision of this script blamed KCFLAGS for not reaching cc1 -- that
+# diagnosis was wrong).
+#
+# It is re-asserted through ccflags-y because ccflags-y is provably delivered to
+# cc1 for these modules (the MTK Makefiles' own `ccflags-y += -Werror` used to
+# abort the build), so this also documents the intended code model in the
+# module's own Makefile. Appended last so it wins under GCC's last-flag-wins.
+echo ">> force -mcmodel=large in module Makefiles"
+for mf in "$KROOT/$CONN/common/Makefile" \
+          "$KROOT/$CONN/wlan/Makefile" \
+          "$KROOT/$CONN/wlan/adaptor/Makefile" \
+          "$KROOT/$CONN/bt/Makefile"; do
+  if [ ! -f "$mf" ]; then
+    echo "WARN: module Makefile not found: $mf"
+    continue
+  fi
+  if grep -q 'ARCHYTAS_MCMODEL_LARGE' "$mf"; then
+    echo "   already patched: $mf"
+    continue
+  fi
+  {
+    printf '\n# ARCHYTAS_MCMODEL_LARGE --- injected by port/build_connectivity_modules.sh\n'
+    printf '# CONFIG_ARM64_ERRATUM_843419=y => the module loader rejects ADRP\n'
+    printf '# relocations, so the module must be built with the large code model.\n'
+    printf 'ccflags-y += -mcmodel=large\n'
+    printf 'subdir-ccflags-y += -mcmodel=large\n'
+  } >> "$mf"
+  echo "   injected -mcmodel=large into $mf"
+done
+
+# ---- 2e. Let the module loader process ADRP relocations (THE ADRP FIX) -----
+# `-mcmodel=large` (step 2d) is applied, and it is still NOT enough: GCC 11 on
+# aarch64 keeps emitting `adrp`+`ldr` pairs that read a 64-bit slot from a
+# per-function LITERAL POOL placed inside .text itself (the `$d` mapping symbols
+# GAS emits). Measured on the build #8 artifact (bt_drv.ko, 461496 B):
+#     161 x R_AARCH64_ADR_PREL_PG_HI21 (275), ALL targeting "[sec].text" with
+#     small, 8-byte-aligned addends that sit immediately after a function end
+#     (0x1d8 right after BT_poll@0x100+0xd4, 0x2a8, 0x798, 0xcc0, ...), each
+#     paired with a 64-bit pool slot that carries an R_AARCH64_ABS64 (257).
+# Binutils' aarch64 linker enables --fix-cortex-a53-843419 BY DEFAULT, and
+# arch/arm64/Makefile only adds `--no-fix-cortex-a53-843419` in the *else*
+# branch, i.e. when the erratum is disabled -- so with
+# CONFIG_ARM64_ERRATUM_843419=y the module link keeps its erratum fix and the
+# surviving ADRP relocations are exactly what the kernel loader refuses:
+#     module wmt_drv: unsupported RELA relocation: 275
+#     insmod: failed to load ...: Exec format error
+#
+# No compiler flag makes these go away, so fix the one place that actually
+# decides: arch/arm64/kernel/module.c compiles the ADRP handlers out behind
+#     #ifndef CONFIG_ARM64_ERRATUM_843419
+#         case R_AARCH64_ADR_PREL_PG_HI21_NC:
+#         case R_AARCH64_ADR_PREL_PG_HI21: ...
+#     #endif
+# Drop that guard so ADRP relocations are relocated like every other type.
+# The upstream intent (modules use the large model => they never need this) does
+# not hold for these old MTK modules, and the reloc_insn_imm(RELOC_OP_PAGE,...)
+# body itself is the standard, correct handler.
+#
+# Deliberately NOT done instead: disabling CONFIG_ARM64_ERRATUM_843419 in the
+# defconfig. That would also drop --fix-cortex-a53-843419 from LDFLAGS_vmlinux
+# and so remove the erratum workaround from the KERNEL ITSELF (real Cortex-A53
+# hardware bug: "a load or store might access an incorrect address"). This
+# surgical patch keeps the kernel binary's workaround intact and only relaxes
+# the module-loader policy. Trade-off: the ADRPs inside the modules are then
+# accepted verbatim, which is exactly what the (default-on) linker erratum fix
+# already vetted.
+#
+# NOTE: this changes the KERNEL, so the boot image must be rebuilt and reflashed
+# once; after that, --modules-only runs only need the .ko files.
+echo ">> allow ADRP relocations in arch/arm64/kernel/module.c"
+MODULE_C="$KROOT/arch/arm64/kernel/module.c"
+if [ ! -f "$MODULE_C" ]; then
+  echo "ERROR: $MODULE_C not found; cannot apply the ADRP relocation fix"
+  exit 1
+fi
+python3 - "$MODULE_C" <<'PY'
+import re, sys
+p = sys.argv[1]
+src = open(p, encoding="utf-8", errors="surrogateescape").read()
+if "ARCHYTAS_ADRP_RELOC" in src:
+    print("   already patched (marker present)")
+    sys.exit(0)
+# Match the guard exactly, tolerating indentation of the cases.
+old = re.compile(
+    r"[ \t]*#ifndef CONFIG_ARM64_ERRATUM_843419\n"
+    r"([ \t]*case R_AARCH64_ADR_PREL_PG_HI21_NC:\n"
+    r"[\s\S]*?break;\n)"
+    r"[ \t]*#endif\n")
+m = old.search(src)
+if not m:
+    sys.exit("ERROR: could not find the CONFIG_ARM64_ERRATUM_843419 ADRP guard "
+             "in %s -- the kernel source layout changed" % p)
+body = m.group(1)
+note = ("/* ARCHYTAS_ADRP_RELOC: the guard `#ifndef CONFIG_ARM64_ERRATUM_843419`\n"
+        " * used to compile these ADRP handlers out, which made every module that\n"
+        " * contains an ADRP relocation unloadable (`unsupported RELA relocation:\n"
+        " * 275`, -ENOEXEC).  These MTK connectivity modules DO contain them even\n"
+        " * though they are built with -mcmodel=large, so handle them normally.\n"
+        " * See port/build_connectivity_modules.sh step 2e. */\n")
+open(p, "w", encoding="utf-8", errors="surrogateescape").write(
+    src[:m.start()] + note + body + src[m.end():])
+n = body.count("case R_AARCH64_ADR_PREL_PG_HI21")
+print("   patched: %d ADRP case label(s) now compiled unconditionally" % n)
+PY
+if ! grep -q "ARCHYTAS_ADRP_RELOC" "$MODULE_C"; then
+  echo "ERROR: ADRP relocation patch did not apply; modules with ADRP would be rejected"
+  exit 1
+fi
+if grep -q '^#ifndef CONFIG_ARM64_ERRATUM_843419' "$MODULE_C"; then
+  echo "WARN: a '#ifndef CONFIG_ARM64_ERRATUM_843419' is still present in $MODULE_C"
+fi
+
 # ---- 3. Prepare generated headers / vmlinux symtab for out-of-tree modpost
 echo ">> modules_prepare"
 make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
@@ -256,21 +430,40 @@ build_mod() {
   #   insmod failed with:
   #       module wmt_drv: unsupported RELA relocation: 275
   #   Pass it explicitly. Verified after the build by check_no_adrp() below.
+  # Always rebuild: a cached/pre-existing .o would keep stale codegen and silently
+  # defeat the -mcmodel=large change (that is exactly what fooled build #14/#15).
+  rm -rf "$KOUT/$CONN/$d"
   make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
        HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" \
        KCFLAGS="-mcmodel=large -Wno-error -include $WLAN_DIR/emi_compat.h" \
        AUTOCONF_H="$AUTOCONF" KERNEL_OUT="$KOUT" TOP="$KROOT" \
        KBUILD_MODPOST_FAIL_ON_WARNINGS= \
        M="$CONN/$d" "$@" modules -j"$JOBS"
+
+  # Diagnostic: show the flags cc1 actually received, straight out of Kbuild's
+  # own .<obj>.cmd command file. This is how we prove (or disprove) that
+  # -mcmodel=large made it into the compile line.
+  local _cmd _flags
+  _cmd=$(find "$KOUT/$CONN/$d" -name '*.o.cmd' 2>/dev/null | head -1)
+  if [ -n "$_cmd" ]; then
+    _flags=$( { grep -o -E -- '-mcmodel=[a-z]+|-fno-PIE|-fPIE|-fpic|-fPIC|-include [^ ]*emi_compat.h' "$_cmd" || true; } \
+              | sort -u | tr '\n' ' ')
+    echo "   [flags] $(basename "$_cmd") => ${_flags:-<none of interest>}"
+  else
+    echo "   [flags] no .o.cmd under $KOUT/$CONN/$d (module may not have compiled)"
+  fi
 }
 
-# Refuse to ship a module that still contains ADRP (275/276) relocations: the
-# running kernel rejects those with -ENOEXEC. A module that cannot insmod is
-# worse than a red CI run, so fail loudly and point at the cause.
-check_no_adrp() {
+# Report the relocation profile of each shipped module. ADRP (275/276) is NOT
+# fatal any more -- step 2e patches the kernel loader to relocate it -- but it is
+# still worth printing, both to catch a codegen regression and because a count of
+# zero would mean the modules no longer depend on the kernel patch at all.
+# Also prints the codegen flags GCC recorded inside the .ko (DW_AT_producer), the
+# only reliable way to prove which -m/-f flags actually reached cc1.
+report_relocs() {
   local ko="$1"
   python3 - "$ko" <<'PY'
-import struct, sys
+import re, struct, sys
 p = sys.argv[1]
 d = open(p, "rb").read()
 if d[:4] != b"\x7fELF" or d[4] != 2:
@@ -285,7 +478,7 @@ shstr_off = secs[shstrndx][4]
 def nm(x):
     e = d.index(b"\0", shstr_off + x)
     return d[shstr_off + x:e].decode("utf-8", "replace")
-bad = 0
+adrp = 0
 for s in secs:
     if s[1] not in (4, 9) or not nm(s[0]).startswith(".rel"):
         continue
@@ -293,11 +486,16 @@ for s in secs:
     for k in range(s[5] // esz):
         r_info = struct.unpack_from("<Q", d, s[4] + k * esz + 8)[0]
         if (r_info & 0xFFFFFFFF) in (275, 276):
-            bad += 1
-if bad:
-    sys.exit("FAIL: %s has %d ADRP(275/276) relocations -> kernel will reject it "
-             "(-ENOEXEC). -mcmodel=large did not take effect." % (p, bad))
-print("   ADRP check OK: %s" % p)
+            adrp += 1
+flags = []
+m = re.search(rb"GNU C[0-9][^\x00]{10,400}", d)
+if m:
+    for f in (b"-mcmodel=large", b"-fno-pic", b"-fPIE", b"-fpic",
+              b"-fstack-protector", b"-fno-jump-tables"):
+        if f in m.group(0):
+            flags.append(f.decode())
+print("   %-22s ADRP(275/276) = %-5d  codegen: %s"
+      % (p.rsplit("/", 1)[-1], adrp, " ".join(flags) or "<unreadable>"))
 PY
 }
 
@@ -365,13 +563,75 @@ if [ -n "$_missing" ]; then
 fi
 echo "   OK: all 4 connectivity modules present."
 
-# Every shipped module must be insmod-able on the target kernel: no ADRP.
+# Relocation profile of every shipped module (see report_relocs).
+echo "=== relocation profile ==="
 for m in "$OUTDIR"/*.ko; do
-  check_no_adrp "$m"
+  report_relocs "$m"
 done
 
-# vermagic sanity check
-echo "=== vermagic ==="
+# Hard gate for the ONLY thing that makes those modules loadable: the target
+# kernel must carry the ADRP relocation fix from step 2e. Shipping .ko files that
+# need a kernel without the fix would just reproduce the insmod -ENOEXEC failure.
+if grep -q "ARCHYTAS_ADRP_RELOC" "$KROOT/arch/arm64/kernel/module.c" 2>/dev/null; then
+  echo "   OK: kernel source carries the ADRP relocation fix (ARCHYTAS_ADRP_RELOC)."
+  echo "       -> the boot image built from THIS tree must be flashed once."
+else
+  echo "ERROR: arch/arm64/kernel/module.c does NOT carry the ADRP relocation fix;"
+  echo "       any module containing ADRP would be rejected by insmod (-ENOEXEC)."
+  exit 1
+fi
+
+# kernel -> module. `modinfo` on the runner would describe the RUNNER's kernel,
+# not the target, so read the strings straight out of the ELF `.modinfo` section.
+# This matters: a vermagic mismatch makes insmod fail instantly
+# ("version magic ... should be ..."), and the module's internal `name=` is what
+# lsmod will show (the on-disk filename wlan_drv_gen4m.ko is just what the
+# vendor init.rc insmods by path).
+#
+# Also counts __versions entries, because the target vermagic contains
+# "modversions" (CONFIG_MODVERSIONS=y). Symbol CRCs are pulled from the kernel's
+# Module.symvers at modpost time; a --modules-only run never builds vmlinux, so
+# that file may be absent and __versions comes out empty. That is survivable --
+# check_version() only rejects a symbol whose name IS listed with a different
+# crc, and an empty (but present) __versions falls through to its
+# "broken toolchain, warn once, return 1" path -- but it is worth seeing, since a
+# MISSING section would instead fail with -ENOEXEC.
+echo "=== modinfo (name / vermagic / __versions) ==="
+if [ -f "$KOUT/Module.symvers" ]; then
+  echo "   kernel Module.symvers present: $(wc -l < "$KOUT/Module.symvers") symbols"
+else
+  echo "   NOTE: $KOUT/Module.symvers absent (expected in --modules-only mode;"
+  echo "         symbol CRCs will be empty -> __versions entry count 0)"
+fi
 for m in "$OUTDIR"/*.ko; do
-  echo "$(basename "$m"): $(modinfo -k "$(uname -r)" "$m" 2>/dev/null | grep -i vermagic || true)"
+  python3 - "$m" <<'PY'
+import struct, sys
+p = sys.argv[1]
+d = open(p, "rb").read()
+(_t, _m, _v, _e, _po, shoff, _f,
+ _eh, _pe, _pn, shentsize, shnum, shstrndx) = struct.unpack_from("<HHIQQQIHHHHHH", d, 16)
+secs = []
+for i in range(shnum):
+    o = shoff + i * shentsize
+    secs.append(struct.unpack_from("<IIQQQQIIQQ", d, o))
+shstr_off = secs[shstrndx][4]
+def nm(x):
+    e = d.index(b"\0", shstr_off + x)
+    return d[shstr_off + x:e].decode("utf-8", "replace")
+info = {}
+ver_size = None
+for s in secs:
+    name = nm(s[0])
+    if name == ".modinfo":
+        for entry in d[s[4]:s[4] + s[5]].split(b"\0"):
+            if b"=" in entry:
+                k, _, v = entry.decode("utf-8", "replace").partition("=")
+                info[k] = v
+    elif name == "__versions":
+        ver_size = s[5]
+print("   %-22s name=%-20s __versions=%-4s vermagic=%s"
+      % (p.rsplit("/", 1)[-1], info.get("name", "?"),
+         "absent" if ver_size is None else "%d" % (ver_size // 72),
+         info.get("vermagic", "<missing!>")))
+PY
 done

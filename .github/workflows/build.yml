@@ -3,8 +3,15 @@ name: Build Archytas (Wi-Fi) 64-bit Kernel
 on:
   workflow_dispatch:
     inputs:
+      modules_only:
+        description: 'Fast lane: skip the kernel build, only rebuild the 4 connectivity .ko (~3 min instead of ~11)'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+        default: 'false'
       build_stage:
-        description: 'Which boot image to build'
+        description: 'Which boot image to build (ignored in the fast lane)'
         type: choice
         options:
           - both
@@ -49,7 +56,15 @@ jobs:
              kernel/arch/arm64/configs/k61v1_64_archytas_defconfig
           ls -l kernel/arch/arm64/configs/k61v1_64_archytas_defconfig
 
+      # NOTE on the fast lane (modules_only=true): port/build_connectivity_modules.sh
+      # does not build the kernel at all -- it only compiles the four out-of-tree
+      # .ko files. The slow part of this workflow has always been Image.gz-dtb above
+      # it, so the fast lane simply skips that step and lets the module script run
+      # `defconfig` + `modules_prepare` itself (~1-3 min) when the out-tree is cold.
+      # Use it when the boot image is already built/flashed and you are iterating on
+      # the connectivity drivers only.
       - name: Build kernel (pure variant, Image.gz-dtb)
+        if: ${{ github.event.inputs.modules_only != 'true' }}
         working-directory: kernel
         env:
           JOBS: "4"
@@ -83,14 +98,45 @@ jobs:
         env:
           KERNEL: kernel
           KOUT: kernel/out-archytas
+          # 1 in the fast lane: the script prepares the out-tree itself (modules_prepare)
+          # instead of requiring a full kernel build to have produced it.
+          MODULES_ONLY: ${{ github.event.inputs.modules_only == 'true' && '1' || '0' }}
         run: |
           # Builds the four AArch64 connectivity .ko files (wmt_drv, wmt_chrdev_wifi,
           # wlan_drv_gen4m, bt_drv) from agui's pinned external repos + 4.9 compat patches.
           # The checked-out kernel source already carries agui's Wi-Fi DTS/EMI/MPU/CONNSYS
           # fixes, so only the out-of-tree modules are produced here.
+          #
+          # It ALSO patches arch/arm64/kernel/module.c to compile the ADRP relocation
+          # handlers in unconditionally (see step 2e in the script): the target kernel
+          # runs with CONFIG_ARM64_ERRATUM_843419=y, which otherwise makes it refuse any
+          # module containing an ADRP reloc with "unsupported RELA relocation: 275".
+          # -mcmodel=large is already applied and does NOT remove them.
           bash port/build_connectivity_modules.sh "$KERNEL" "$KOUT"
 
+      - name: Summarise connectivity modules
+        run: |
+          OUT=kernel/out-archytas/connectivity-modules
+          {
+            echo "## Connectivity modules"
+            echo
+            echo "| module | size |"
+            echo "|---|---|"
+            for f in "$OUT"/*.ko; do
+              echo "| \`$(basename "$f")\` | $(du -h "$f" | cut -f1) |"
+            done
+            echo
+            if [ "${{ github.event.inputs.modules_only }}" = "true" ]; then
+              echo "Fast lane: the kernel was NOT rebuilt, so no boot image is in this artifact."
+              echo "Flash the boot image from an earlier full run (it already carries the ADRP fix)."
+            else
+              echo "Full run: boot images below already include the ADRP relocation fix."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          ls -l "$OUT"
+
       - name: Package boot images
+        if: ${{ github.event.inputs.modules_only != 'true' }}
         env:
           STAGE: ${{ github.event.inputs.build_stage || 'both' }}
           KERNEL: kernel/out-archytas/arch/arm64/boot/Image.gz-dtb
@@ -125,6 +171,7 @@ jobs:
           esac
 
       - name: Upload boot images and connectivity modules
+        if: ${{ github.event.inputs.modules_only != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: archytas-wifi-boot-and-modules
@@ -134,8 +181,21 @@ jobs:
             kernel/out-archytas/connectivity-modules/*.ko
           if-no-files-found: error
 
+      - name: Upload connectivity modules (fast lane)
+        if: ${{ github.event.inputs.modules_only == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: archytas-wifi-modules-only
+          path: kernel/out-archytas/connectivity-modules/*.ko
+          if-no-files-found: error
+
 # Flashing notes (not done by CI):
 #   - Flash boot-archytas-wifi.img (or stage1) to the boot partition with MTKClient.
 #   - dtbo partition MUST use the Wi-Fi OEM dtbo.bin (do NOT use the 4G one).
 #   - Disable AVB: mtk w vbmeta --disable-verification
+#   - The boot image must come from a run that included the ADRP relocation fix in
+#     arch/arm64/kernel/module.c (every non-fast-lane run does). Without it the
+#     connectivity .ko files fail to insmod with -ENOEXEC / "unsupported RELA
+#     relocation: 275". So: flash once from a full run, then use the fast lane
+#     (modules_only=true) to iterate on the .ko files alone.
 #   - See port/ARCHYTAS_PORT.md and port/flash_archytas.sh for the full runbook.

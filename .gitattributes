@@ -1,0 +1,11 @@
+# Shell scripts, Python and CI definitions run on Linux (GitHub Actions).
+# core.autocrlf is true in this working copy, so pin LF explicitly: a CRLF
+# port/build_connectivity_modules.sh fails on the runner with
+# "bash: $'\r': command not found".
+*.sh    text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Everything else: normalise CRLF away in the repo, keep the working copy as-is.
+* text=auto
