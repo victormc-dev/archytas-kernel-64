@@ -20,6 +20,28 @@ on:
         default: both
   push:
     branches: [ main ]
+    # Don't burn an ~11 min runner when a push cannot change the build output.
+    # Only paths that are NOT referenced anywhere in the build chain are listed
+    # -- i.e. docs, this repo's dev-time self-check harness, the CI helper
+    # scripts and the offline DTB analysis tools. The build chain (build.yml +
+    # build_connectivity_modules.sh) only touches these port/ files:
+    #   patch_adrp_reloc.py, patch_wifi_dtb.py, make_wifi_template.py,
+    #   elf_symbols.py, elf_debug_share.py, build_connectivity_modules.sh,
+    #   k61v1_64_archytas_defconfig, wifi_stock.dtb, 4g_stock.dtb
+    # so none of the below may appear here. GitHub skips the run only when EVERY
+    # changed path matches, so a doc tweak committed together with a real change
+    # still builds. verify_build_script.py asserts both halves of this contract.
+    # workflow_dispatch and pull_request are deliberately NOT filtered: the fast
+    # lane must stay manually runnable, and a PR should always be validated.
+    paths-ignore:
+      - '**/*.md'
+      - 'port/verify_build_script.py'
+      - 'port/ci_*.py'
+      - 'port/dtb_*.py'
+      - 'port/analyze_oem_diff.py'
+      - 'port/check_ramdisk.py'
+      - 'port/dump_relocs.py'
+      - 'port/ext4_read.py'
   pull_request:
 
 # Allow the workflow to upload artifacts.

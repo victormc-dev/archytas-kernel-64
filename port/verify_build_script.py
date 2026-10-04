@@ -52,11 +52,18 @@ downloaded CI artifact; those skip cleanly when absent). Checks:
      template grew to 33554542 B and package_archimedes_boot.py died one step
      later with the misleading "template must be an exact 32 MiB Android boot
      image". Skipped when the agui checkout or the ROM DTB is absent.
+ 12. CI trigger hygiene. The push trigger carries a paths-ignore list so that
+     docs / this harness / the offline DTB analysis tools do not burn an ~11 min
+     runner, while no file the build reads may ever appear in it. Both halves are
+     asserted, because a silently ignored build input would leave a stale boot
+     image looking green. Also asserts the filter is attached to push only --
+     workflow_dispatch (fast lane) and pull_request stay unfiltered.
 
 The Bash tool rewrites backslashes inside heredocs, so running snippets
 straight from a shell command line is unreliable -- hence this harness.
 """
 import ast
+import fnmatch
 import re
 import shutil
 import struct
@@ -647,6 +654,82 @@ else:
                   "ACCEPTED -- guard missing!")
             check("control: no oversize image is written",
                   not (_tdp / "big.img").exists())
+
+# ---------------------------------------------------------------- group 12 --
+# CI trigger hygiene. A push that only touches docs, this harness or the offline
+# analysis tools cannot change the build output, so it must not burn an ~11 min
+# runner. The risk in the other direction is worse though: silently ignoring a
+# file the build actually reads would leave a stale boot image looking green, so
+# both halves of that contract are asserted here.
+print("\n== 12. CI trigger hygiene (paths-ignore) ==")
+
+
+def _gh_match(path, pat):
+    """Approximate GitHub's paths-ignore matching (**/ also matches zero dirs)."""
+    if fnmatch.fnmatch(path, pat):
+        return True
+    while pat.startswith("**/"):
+        pat = pat[3:]
+        if fnmatch.fnmatch(path, pat):
+            return True
+    return False
+
+
+_pi = []
+_in = False
+for _line in _wf.splitlines():
+    _s = _line.strip()
+    if _s.startswith("paths-ignore:"):
+        _in = True
+        continue
+    if _in:
+        if _s.startswith("- "):
+            _pi.append(_s[2:].strip().strip("'\""))
+        elif _s and not _s.startswith("#"):
+            break                      # next top-level key -> end of the block
+
+check("workflow filters the push trigger (paths-ignore)", bool(_pi),
+      "%d pattern(s): %s" % (len(_pi), ", ".join(_pi)))
+
+# The fast lane is dispatched by hand and must stay runnable; pull_request should
+# keep validating every PR. So the filter may only be attached to push.
+_push_block = _wf.split("push:", 1)[1].split("pull_request:", 1)[0] \
+    if "push:" in _wf and "pull_request:" in _wf else ""
+check("paths-ignore is attached to push only",
+      "paths-ignore" in _push_block)
+
+# Anything the build reads must NEVER be matched. A stale-but-green image is the
+# worst possible outcome, so this list is the guard rail, not decoration.
+_BUILD_INPUTS = [
+    "port/patch_adrp_reloc.py",
+    "port/patch_wifi_dtb.py",
+    "port/make_wifi_template.py",
+    "port/elf_symbols.py",
+    "port/elf_debug_share.py",
+    "port/build_connectivity_modules.sh",
+    "port/k61v1_64_archytas_defconfig",
+    "port/wifi_stock.dtb",
+    "port/4g_stock.dtb",
+    "port/flash_archytas.sh",
+    ".github/workflows/build.yml",
+]
+_bad = [(b, p) for b in _BUILD_INPUTS for p in _pi if _gh_match(b, p)]
+check("no build input is matched by paths-ignore", not _bad, repr(_bad))
+
+# ...and the things we set out to skip must really be skipped.
+_SKIP = [
+    "port/verify_build_script.py",
+    "port/ci_logs.py",
+    "port/ci_artifact.py",
+    "port/dtb_dump.py",
+    "port/dtb_diff.py",
+    "port/analyze_oem_diff.py",
+    "port/ARCHYTAS_PORT.md",
+    "HANDOFF.md",
+]
+_missed = [s for s in _SKIP if not any(_gh_match(s, p) for p in _pi)]
+check("docs / self-check / CI helpers / analysis tools are all skipped",
+      not _missed, "not covered: %s" % ", ".join(_missed))
 
 print("\n================ %s ================" % (
     "ALL CHECKS PASS" if not failures else "FAILURES: " + ", ".join(failures)))
