@@ -22,7 +22,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 300
     steps:
       - name: Checkout this repo (port/ scripts + defconfig + Wi-Fi DTB)
         uses: actions/checkout@v4
@@ -79,6 +79,17 @@ jobs:
                -j"$JOBS" Image.gz-dtb
           ls -l "$OUT/arch/arm64/boot/Image.gz-dtb"
 
+      - name: Build connectivity kernel modules (wmt/wlan/bt)
+        env:
+          KERNEL: kernel
+          KOUT: kernel/out-archytas
+        run: |
+          # Builds the four AArch64 connectivity .ko files (wmt_drv, wmt_chrdev_wifi,
+          # wlan_drv_gen4m, bt_drv) from agui's pinned external repos + 4.9 compat patches.
+          # The checked-out kernel source already carries agui's Wi-Fi DTS/EMI/MPU/CONNSYS
+          # fixes, so only the out-of-tree modules are produced here.
+          bash port/build_connectivity_modules.sh "$KERNEL" "$KOUT"
+
       - name: Package boot images
         env:
           STAGE: ${{ github.event.inputs.build_stage || 'both' }}
@@ -113,14 +124,15 @@ jobs:
               ;;
           esac
 
-      - name: Upload boot images
+      - name: Upload boot images and connectivity modules
         uses: actions/upload-artifact@v4
         with:
-          name: archytas-wifi-boot
+          name: archytas-wifi-boot-and-modules
           path: |
             boot-archytas-wifi-stage1.img
             boot-archytas-wifi.img
-          if-no-files-found: ignore
+            kernel/out-archytas/connectivity-modules/*.ko
+          if-no-files-found: error
 
 # Flashing notes (not done by CI):
 #   - Flash boot-archytas-wifi.img (or stage1) to the boot partition with MTKClient.
