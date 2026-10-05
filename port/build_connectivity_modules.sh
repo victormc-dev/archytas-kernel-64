@@ -343,7 +343,32 @@ fi
 # schedule_work() so WMT stays powered across screen blanks.
 WMT_DEV="$KROOT/$CONN/common/common_main/linux/wmt_dev.c"
 if grep -q '@@@@@@@@@@wmt enter early POWERDOWN' "$WMT_DEV"; then
-  sed -i '/@@@@@@@@@@wmt enter early POWERDOWN/{n;s|schedule_work(&gPwrOnOffWork);|/* ARCHYTAS PATCH: skip screen-off early POWERDOWN - Wi-Fi stays alive */ break;|}' "$WMT_DEV"
+  python3 - "$WMT_DEV" <<'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+    lines = f.readlines()
+anchor = '@@@@@@@@@@wmt enter early POWERDOWN'
+target = 'schedule_work(&gPwrOnOffWork);'
+out, i, patched = [], 0, False
+while i < len(lines):
+    line = lines[i]
+    out.append(line)
+    i += 1
+    if anchor in line:
+        while i < len(lines) and target not in lines[i]:
+            out.append(lines[i])
+            i += 1
+        if i < len(lines):
+            indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+            out.append(f'{indent}/* ARCHYTAS PATCH: skip screen-off early POWERDOWN */\n')
+            patched = True
+            i += 1
+if not patched:
+    print('WARN: python patch did not find schedule_work after POWERDOWN anchor')
+with open(path, 'w', encoding='utf-8') as f:
+    f.writelines(out)
+PYEOF
   echo "   patched wmt_fb_notifier_callback: skip POWERDOWN work"
 else
   echo "WARN: wmt_dev.c POWERDOWN anchor not found; early POWERDOWN NOT patched"
