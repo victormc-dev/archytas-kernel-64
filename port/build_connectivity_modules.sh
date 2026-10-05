@@ -911,9 +911,9 @@ _esym=$(python3 "$PORT/elf_symbols.py" "$OUTDIR/wlan_drv_gen4m.ko" \
 printf '%s\n' "$_esym"
 _emi_ok=true
 if printf '%s\n' "$_esym" | grep -qE '^  wlanDownloadEMISection +[A-Z]+ +FUNC'; then
-  _emi_fn=$(printf '%s\n' "$_esym" | grep -E '^  wlanDownloadEMISection +[A-Z]+ +FUNC')
-  # last field is the size -- e.g. "wlanDownloadEMISection LOCAL FUNC sz=108"
-  _sz=$(echo "$_emi_fn" | grep -oE 'sz=[0-9]+$' | cut -d= -f2)
+  # elf_symbols.py emits: "  NAME  BIND  TYPE  ndx  value  size" -- size is the
+  # LAST whitespace-separated field.  Use awk to extract it reliably.
+  _sz=$(printf '%s\n' "$_esym" | grep -E '^  wlanDownloadEMISection +[A-Z]+ +FUNC' | awk '{print $NF}')
   echo "   wlanDownloadEMISection size = ${_sz:-?}"
   if [ "${_sz:-0}" -le 16 ]; then
     echo "ERROR: wlanDownloadEMISection is still a stub (size <= 16)."
