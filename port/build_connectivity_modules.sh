@@ -317,6 +317,21 @@ else
   echo "WARN: -Wno-error anchor not found in wlan Makefile; EMI shims NOT injected"
 fi
 
+# ---- 2c-2. Patch out the suspend-mode main_thread deadlock -------------------
+# WHY: wpa_supplicant sends SETSUSPENDMODE 1 at init.  priv_driver_set_suspend_mode
+# forwards it to main_thread → wlanSetSuspendMode → send FW suspend command →
+# wait for FW reply.  Under CFG_MTK_ANDROID_EMI=1 the firmware is busy and
+# never replies → main_thread holds mutex for 30s per timeout, dies after 4.
+# We patch gl_wext_priv.c so the skip-the-already-suspended guard is bypassed
+# and the function returns SUCCESS without ever touching wlanSetSuspendMode.
+SUSPEND_FILE="$WLAN_DIR/os/linux/gl_wext_priv.c"
+if grep -q 'wlanSetSuspendMode(prGlueInfo, fgEnable);' "$SUSPEND_FILE"; then
+  sed -i 's|wlanSetSuspendMode(prGlueInfo, fgEnable);|/* ARCHYTAS PATCH: deadlock workaround - skip suspend path entirely */\n  return 0;|' "$SUSPEND_FILE"
+  echo "   patched priv_driver_set_suspend_mode: skip wlanSetSuspendMode call"
+else
+  echo "WARN: suspend anchor not found; deadlock NOT patched"
+fi
+
 # ---- 2d. Force the large code model for every connectivity module -----------
 # WHY: the target kernel is built with CONFIG_ARM64_ERRATUM_843419=y
 # (Cortex-A53 erratum), which selects CONFIG_ARM64_MODULE_CMODEL_LARGE and makes

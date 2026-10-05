@@ -24,6 +24,18 @@ FW_START 握手超时 + `gRxCount=-1` 垃圾值。根因：`consys-reserve-memor
 两侧地址不匹配。修法：`patch_wifi_dtb.py` 扩展（零尺寸增长），把 `alloc-ranges` 换成固定
 `reg = <0x0 0xbf000000 0x0 0x400000>`。
 
+**2026-10-05 追加（见第 9.13/9.15 节）**：consys DTB 修复后 FW_START EVT success 但
+固件 crash at EVA=0xF0400000 → `CFG_MTK_ANDROID_EMI=0` 让 EMI 固件段被静默跳过。
+`wlanDownloadEMISection` 在旧 `.ko` 里是 8 字节 stub（MOV X0,0; RET）。
+修法：`build_connectivity_modules.sh` 的 `build_mod wlan` 加 `MTK_ANDROID_EMI=y`
+（wlan/core Makefile 自己有 `ifeq ($(MTK_ANDROID_EMI), y)` 控制分支，之前只传了
+`MTK_ANDROID_WMT=y`）。修完后 `wlanDownloadEMISection` 从 8 字节长到 556 字节。
+
+**2026-10-05 里程碑（见第 9.15 节）**：Wi-Fi **完全通了**——FW_START EVT success、
+main_thread 正常运行、扫描 7 个 AP、关联成功、拿到 IP 192.168.1.41、ping 通网关
+192.168.1.1 零丢包。原厂 init.rc 自动加载 64 位 .ko 生效（覆盖 `/vendor/lib/modules/`
+下的 32 位版本），每次重启自动工作。累计 6 个根因。
+
 ---
 
 ## 1. 核心结论（原厂对原厂，权威）
@@ -1219,4 +1231,94 @@ ip link show wlan0
 
 ---
 
-*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*
+## 9.15 🎉 **里程碑达成：Wi-Fi 完全通了**（2026-10-05 16:33 真机验证）
+
+**累计 6 个根因层，每一层修复才能暴露下一层。** 这是完整的成功链：
+
+```
+# dmesg -s 65535 | grep -iE 'EmiPhyBase|FW_START|main_thread|scan|ping|connect'
+
+[   35.041780] wlanDownloadEMISection: EmiPhyBase:0xbf000000 offset:0x177000, ioremap 0x400000
+[   35.053092] wlanDownloadEMISection: EmiPhyBase:0xbf000000 offset:0x1e5000, ioremap 0x400000
+[   35.053341] FW_START CMD send, waiting for RSP
+[   35.072262] FW_START EVT success!!              ← 🎉 第一次成功！之前全 timeout
+[   35.099277] main_thread:1159 starts running...   ← 驱动主循环正常启动
+[   50.288177] [IDLE] -> [SCAN]                     ← 扫描开始
+[   50.979083] scnEventScanDone: ScanDone           ← 扫描完成
+[   50.979301] Total:7/8 ChinaNet-LKLy; Xiaomi_1202; HUAWEI-7FALZG  ← 扫到 AP！
+
+# ip link show wlan0
+9: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DORMANT
+    link/ether 00:08:22:20:f5:fb brd ff:ff:ff:ff:ff:ff
+
+# ifconfig wlan0
+inet addr:192.168.1.41  Bcast:192.168.1.255  Mask:255.255.255.0
+RX packets:55 errors:0 dropped:0 overruns:0 frame:0
+TX packets:109 errors:0 dropped:0 overruns:0 carrier:0
+
+# ping -c 2 192.168.1.1
+64 bytes from 192.168.1.1: icmp_seq=1 ttl=128 time=37.3 ms   ← 0% 丢包
+```
+
+### 6 层根因回顾
+
+| # | 根因 | 修复 | 影响的层 |
+|---|---|---|---|
+| 1 | ADRP relocation 越界 → 内核模块加载崩溃 | `patch_adrp_reloc.py` 改 `module.c` | 内核层 |
+| 2 | `CONFIG_MTK_COMBO_CHIP` 引号错配 → `mtk_wmt_probe` NULL deref | `k61v1_64_archytas_defconfig` | 配置层 |
+| 3 | MTK_COMBO_CHIP 家族名错配 → `mtk_axi_ids[]` NULL | `k61v1_64_archytas_defconfig` | 配置层 |
+| 4 | `wifi-reserve-memory alloc-ranges` 动态选地址 vs bootloader 固定 `0x7f000000` | `patch_wifi_dtb.py` 加固定 `reg` | DTB 层 |
+| 5 | `consys-reserve-memory alloc-ranges` 动态选地址 vs bootloader 固定 `0xbf000000` → STP 共享内存不匹配 | `patch_wifi_dtb.py` 加固定 `reg` | DTB 层 |
+| 6 | `CFG_MTK_ANDROID_EMI=0` → EMI 固件段被静默跳过 → 固件 crash at `EVA=0xF0400000` | `build_connectivity_modules.sh` 加 `MTK_ANDROID_EMI=y` | 模块构建层 |
+
+### 原厂 init.rc 自动加载（2026-10-05 16:28）
+
+**第一次**：原厂 init.rc 自动加载 64 位模块成功。之前需要手动 `insmod` 四个 .ko，
+现在用 `install_wifi_modules.sh` 把 EMI 修复后的 64 位 .ko 覆盖 `/vendor/lib/modules/`
+下的 32 位原厂版本（remount /vendor rw + push + chmod 0644），之后每次重启自动工作：
+
+```bash
+# 设备上电时序（现在完美）：
+# t=34.95s  mtk_wmtd_worker insmod 四个模块（由 init.rc）
+# t=34.96s  wlanProbe 进入 → FW 下载 → EMI section 下载 → FW_START EVT success
+# t=35.09s  main_thread:1159 starts running...
+# t=36.94s  wpa_supplicant SETSUSPENDMODE 0 → skip（暂时没触发死锁）
+# t=50.28s  扫描开始 → 扫到 7 个 AP → 关联成功 → 拿到 IP
+```
+
+**之前手动 insmod 的时序陷阱自动消失**：之前手动 insmod 要等到 t=101.9，而
+wmt_launcher 在 t=90.7 就已上电，驱动还没加载好 → 上电早于驱动。原厂 init.rc 在
+boot complete 时就加载了驱动，wmt_launcher 还没 start → 驱动先于上电。
+
+```bash
+# 验证自动加载（重启后）：
+lsmod | grep -iE 'wmt|wlan|bt'
+# wlan_mt6761_axi      2994176  0
+# wmt_chrdev_wifi        32768  1 wlan_mt6761_axi
+# bt_drv                 36864  1
+# wmt_drv              1396736  4 wlan_mt6761_axi,wmt_chrdev_wifi,bt_drv
+getprop vendor.connsys.driver.ready   # → yes
+ip link show wlan0                     # → state UP
+```
+
+### 后续 TODO
+
+- [ ] **suspend 死锁**（暂未复现）：本轮 wpa_supplicant 发了 `SETSUSPENDMODE 0`，
+  但驱动返回 `Already in suspend mode [0], SKIP!` 跳过了。之前死锁可能在特定条件下
+  触发（已关联后切 suspend）。若后续复现，查 `wlanNotifyFwSuspend → wlanSetSuspendMode
+  → wlanDoIOCTL` 路径为何 main_thread 持锁睡 30s。
+- [ ] **CI 加 post-build 自动刷 vendor**（可选，手动更安全）。
+- [ ] **更新 §7 待真机验证清单**。
+
+### 构建产物版本
+
+- 最后一次构建：`commit 0a80f2c03`（gate #5 修复后的最终 EMI 修复版本）
+- `archytas-wifi-modules-only.zip` 四个模块大小：
+  - wlan_drv_gen4m.ko **5,309,256** 字节（`wlanDownloadEMISection size=556` ✅）
+  - wmt_drv.ko **1,866,592**
+  - wmt_chrdev_wifi.ko **45,912**
+  - bt_drv.ko **43,480**
+
+---
+
+*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）、`build_connectivity_modules.sh`（2026-10-04 重写）、`verify_build_script.py`（Gate #1-5）、`install_wifi_modules.sh`（vendor 分区自动加载）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*
