@@ -693,9 +693,17 @@ fi
 # (wlan/Android.mk:14 passes `MTK_COMBO_CHIP=$(WIFI_CHIP) WLAN_CHIP_ID=$(WLAN_CHIP_ID)`),
 # and it only feeds `wlan_<lower(WLAN_CHIP_ID)>_<HIF>` plus a few per-part
 # tweaks (6765/6873/6779), so this keeps the module name wlan_mt6761_axi.ko.
+# MTK_ANDROID_EMI=y: the wlan/core Makefile has an explicit ifeq that gates
+# -DCFG_MTK_ANDROID_EMI=1 vs =0 on this variable (Makefile:257-261).  Without it
+# the EMI section download path in fw_dl.c compiles to an 8-byte stub and
+# firmware EMI sections are silently skipped (the whole FW_START crash chain
+# we just debugged).  We also inject -DCFG_MTK_ANDROID_EMI=1 via ccflags-y as a
+# belt-and-braces fallback, but THIS is the correct mechanism -- let the
+# Makefile pick its own branch.
 build_mod wlan    MTK_COMBO_CHIP=CONNAC \
                     WLAN_CHIP_ID=MT6761 \
                     MTK_ANDROID_WMT=y \
+                    MTK_ANDROID_EMI=y \
                     CONFIG_MTK_COMBO_WIFI_HIF=axi \
                     CONFIG_MTK_COMBO_WIFI=m \
                     CONFIG_WLAN_DRV_BUILD_IN=n

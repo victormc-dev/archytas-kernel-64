@@ -1167,20 +1167,30 @@ EMI 内存还是脏的，FW_START 阶段在 `0xF0400000` crash。
 
 #### 修复（`port/build_connectivity_modules.sh` step 2c + Gate #5）
 
-1. **`emi_compat.h` / `compat_stub.c` 调整**：
+1. **`build_mod wlan` 加 `MTK_ANDROID_EMI=y`**（THE REAL FIX）：
+   wlan/core Makefile **自己就有一个 ifeq** 控制 EMI 开关：
+   ```makefile
+   # chips/Makefile:257-261
+   ifeq ($(MTK_ANDROID_EMI), y)
+       ccflags-y += -DCFG_MTK_ANDROID_EMI=1
+   else
+       ccflags-y += -DCFG_MTK_ANDROID_EMI=0   # ← 我们掉进了 else 分支！
+   endif
+   ```
+   之前只传了 `MTK_ANDROID_WMT=y`，没传这个。GCC `-D` 参数**最后一个赢**，
+   所以我们 sed 注入的 `-DCFG_MTK_ANDROID_EMI=1` 永远打不过 Makefile 后面
+   追加的 `-D0`（CI run 37200755460 就是这样挂的，Gate #5 完美触发）。
+   现在让 Makefile 自己选对分支，sed 注入的 `-DCFG_MTK_ANDROID_EMI=1` 留作兜底。
+
+2. **`emi_compat.h` / `compat_stub.c` 调整**：
    - `gConEmiPhyBaseFinal` / `gConEmiSizeFinal` 改成 `__weak`（`gl_init.c` 在
      `#if CFG_MTK_ANDROID_EMI=1` 下自己定义强符号，我们的是 fallback）
    - `kalSetEmiMpuProtection` / `kalSetDrvEmiMpuProtection` 继续由 compat_stub.c
      提供（上游 MTK HAL 缺失），仍是 no-op（bootloader/conninfra 已配好 MPU）
    - `emi_compat.h` 保持 force-include，给所有 TU 提供 extern 声明
 
-2. **Makefile 注入宏**（anchored 在 agui 的 `-Wno-error` 行）：
-   ```makefile
-   ccflags-y += -DCFG_MTK_ANDROID_EMI=1
-   ```
-
 3. **Gate #5**：strip 之后检查
-   - `wlanDownloadEMISection size > 16`（不再是 stub）
+   - `wlanDownloadEMISection size > 16`（不再是 8 字节 stub）
    - `kalSetEmiMpuProtection` 符号存在（EMI 路径被引用）
 
 #### 预期修复后的旧 .ko 对比
