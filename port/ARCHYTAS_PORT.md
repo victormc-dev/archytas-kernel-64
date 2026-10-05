@@ -1303,21 +1303,101 @@ ip link show wlan0                     # → state UP
 
 ### 后续 TODO
 
-- [ ] **suspend 死锁**（暂未复现）：本轮 wpa_supplicant 发了 `SETSUSPENDMODE 0`，
-  但驱动返回 `Already in suspend mode [0], SKIP!` 跳过了。之前死锁可能在特定条件下
-  触发（已关联后切 suspend）。若后续复现，查 `wlanNotifyFwSuspend → wlanSetSuspendMode
-  → wlanDoIOCTL` 路径为何 main_thread 持锁睡 30s。
+- [ ] **suspend 死锁根因**（workaround 已加，根因未挖）：`SETSUSPENDMODE 1`
+  → `priv_driver_set_suspend_mode` → main_thread → `wlanSetSuspendMode` → 发 FW suspend cmd
+  → 等 FW reply → FW 不回复 → 30s timeout × 4 = main_thread 死亡。
+  **EMI 引入后才出现**（之前 EMI 是 stub，FW 状态不一致不会在 suspend 路径上卡住）。
+  嫌疑：`gl_kal.c:kalSetSuspendFlagToEMI` 用 `gConEmiPhyBase`（无 Final 后缀），
+  而 `wlanDownloadEMISection` 用 `gConEmiPhyBaseFinal` —— 两个不同全局变量，
+  `gConEmiPhyBase` 可能未初始化 → `wf_ioremap_write(0+offset, ...)` 空指针写入。
 - [ ] **CI 加 post-build 自动刷 vendor**（可选，手动更安全）。
 - [ ] **更新 §7 待真机验证清单**。
 
 ### 构建产物版本
 
-- 最后一次构建：`commit 0a80f2c03`（gate #5 修复后的最终 EMI 修复版本）
-- `archytas-wifi-modules-only.zip` 四个模块大小：
-  - wlan_drv_gen4m.ko **5,309,256** 字节（`wlanDownloadEMISection size=556` ✅）
-  - wmt_drv.ko **1,866,592**
-  - wmt_chrdev_wifi.ko **45,912**
-  - bt_drv.ko **43,480**
+- 最后一次构建：`commit 97c25f1cd`（suspend workaround patch + EMI 完整修复）
+- CI 构建后新 `archytas-wifi-modules-only.zip`：
+  - wlan_drv_gen4m.ko —— suspend patch 后稍变（sed 替换 1 行 → 加 return 0，
+    函数总 bytecode 量略有增减，不影响 ELF size）
+  - 其他 3 个模块不变
+
+---
+
+## 9.16 **suspend 死锁 workaround**（2026-10-05 深夜）
+
+**新的死锁**：Wi-Fi 能通了（§9.15 里程碑），但 `wpa_supplicant` 启动时立刻发
+`SETSUSPENDMODE 1`（enable power save），驱动走到 `wlanSetSuspendMode` → main_thread
+发 FW suspend command → **FW 不回复** → main_thread 持锁睡 30s timeout × 4 =
+完全死亡。之后所有 driver ioctl 卡死（网页打不开、Wi-Fi 设置卡死）。
+
+**为什么 §9.15 那次没触发**：那次 wpa_supplicant 发的是 `SETSUSPENDMODE 0`（disable），
+驱动返回 `"Already in suspend mode [0], SKIP!"` 直接跳过了。这次是 `SETSUSPENDMODE 1`（enable），
+`fgIsInSuspendMode != fgEnable` → 真走 suspend 路径。
+
+### 根因分析
+
+`suspend` 路径是 **EMI 引入后才出现的**（之前 EMI 是 stub，FW 根本没正常启动）。
+
+两个嫌疑点：
+
+1. **`kalSetSuspendFlagToEMI` 用错了全局变量**：
+   ```c
+   // gl_kal.c —— 用的是 gConEmiPhyBase（无 Final 后缀）
+   if (!gConEmiPhyBase) {
+       // 只在 CFG_SUPPORT_CONNINFRA == 1 时通过 conninfra_get_phy_addr 赋值
+       // 否则保持 0！
+   }
+   wf_ioremap_write((gConEmiPhyBase + u4Offset), suspendFlag);
+   ```
+   而 EMI 下载用的是 `gConEmiPhyBaseFinal`（有 Final）——两个不同变量。如果
+   `CFG_SUPPORT_CONNINFRA` 不是 1，`gConEmiPhyBase` 永远是 0 →
+   `wf_ioremap_write(0 + offset, ...)` 空指针写入。
+
+2. **FW 状态机未就绪**：EMI section 下载后 FW 需要一段时间初始化，
+   但 suspend 请求可能在 FW 还在初始化时就到了 → FW 不回复。
+
+### Workaround（`build_connectivity_modules.sh` step 2c-2）
+
+**直接 patch 掉 suspend 调用**：
+
+```bash
+# gl_wext_priv.c — priv_driver_set_suspend_mode 函数里
+# 把这行：
+wlanSetSuspendMode(prGlueInfo, fgEnable);
+# 替换成：
+/* ARCHYTAS PATCH: deadlock workaround - skip suspend path entirely */
+return 0;
+```
+
+**精确锚点**：`wlanSetSuspendMode(prGlueInfo, fgEnable);` 这个精确字符串
+**只在 `priv_driver_set_suspend_mode` 里出现一次**（系统 suspend callback
+用的是 `TRUE`/`FALSE` 字面量，不受影响）。
+
+**代价**：Wi-Fi 永不进入 FW-level power save（耗电增加，但设备插着充电器测）。
+
+**后续根因修复**：需要确认 `CFG_SUPPORT_CONNINFRA` 的值，如果是 0，那
+`kalSetSuspendFlagToEMI` 里 `gConEmiPhyBase` 一直是 0 → 空指针写导致异常，
+可能影响了 FW suspend command 的 reply 路径。
+
+### 刷机验证（CI 新出包后）
+
+```bash
+# 1. 下载 commit 97c25f1cd 的 archytas-wifi-modules-only.zip
+# 2. push 覆盖 vendor 分区（和之前一样）
+adb remount
+for m in wmt_drv.ko wmt_chrdev_wifi.ko wlan_drv_gen4m.ko bt_drv.ko; do
+  adb push $m /vendor/lib/modules/$m
+  adb shell chmod 0644 /vendor/lib/modules/$m
+done
+# 3. 重启
+adb reboot
+# 4. 验证：
+lsmod | grep wmt  # 4 个模块加载
+getprop vendor.connsys.driver.ready  # → yes
+dmesg | grep -c 'wait main_thread'   # → 0！
+ip link show wlan0                   # → state UP
+ping -c 2 192.168.1.1                # → 0% loss
+```
 
 ---
 

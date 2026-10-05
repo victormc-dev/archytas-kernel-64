@@ -332,6 +332,23 @@ else
   echo "WARN: suspend anchor not found; deadlock NOT patched"
 fi
 
+# ---- 2c-3. Patch out the screen-off early POWERDOWN deadlock -----------------
+# WHY: wmt_fb_notifier_callback registers with fb_register_client(). When the
+# LCD blanks (FB_BLANK_POWERDOWN, triggered automatically by the Archytas's
+# ~3-minute auto screen-off), it schedules gPwrOnOffWork → wmt_pwr_on_off_handler
+# → OPID(4) type(9) power-off AF.  If main_thread is mid-cmd with the FW, the
+# powerdown races the firmware into a half-dead state where every subsequent
+# kalIoctlByBssIdx waits 30 s × N → wificond and WifiSettingsUI freeze.
+# We keep the atomic_set flag updates (they are harmless) but skip the
+# schedule_work() so WMT stays powered across screen blanks.
+WMT_DEV="$KROOT/$CONN/common/common_main/linux/wmt_dev.c"
+if grep -q '@@@@@@@@@@wmt enter early POWERDOWN' "$WMT_DEV"; then
+  sed -i '/@@@@@@@@@@wmt enter early POWERDOWN/{n;s|schedule_work(&gPwrOnOffWork);|/* ARCHYTAS PATCH: skip screen-off early POWERDOWN - Wi-Fi stays alive */ break;|}' "$WMT_DEV"
+  echo "   patched wmt_fb_notifier_callback: skip POWERDOWN work"
+else
+  echo "WARN: wmt_dev.c POWERDOWN anchor not found; early POWERDOWN NOT patched"
+fi
+
 # ---- 2d. Force the large code model for every connectivity module -----------
 # WHY: the target kernel is built with CONFIG_ARM64_ERRATUM_843419=y
 # (Cortex-A53 erratum), which selects CONFIG_ARM64_MODULE_CMODEL_LARGE and makes
