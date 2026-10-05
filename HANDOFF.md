@@ -63,6 +63,7 @@
    - `dtbo` **刷 Wi-Fi 原厂**；刷 boot 同步 `mtk vbmeta 2`；沿用 Wi-Fi 原厂 `lk.bin`。
 4. **验证**：进 Android、亮屏、触控/Wi-Fi/蓝牙/音频正常。重点排查 **LCM 黑屏**（lk atag 传的面板名 vs 内核 `CONFIG_CUSTOM_KERNEL_LCM` 列表不匹配）。
 5. **回退**：随时 `mtk w boot/dtbo/vbmeta <备份>` 刷回，不会硬变砖（preloader/lk 未动）。
+6. **suspend 死锁对照审计（2026-10-05）**：已用 agui 4G `vendor.img` 做 ground truth 审计（见 `port/AGUI_4G_VENDOR_AUDIT.md`，脚本 `port/audit_agui_vendor.py`）。结论：`gConEmiPhyBase` 由内核导出（consys `0xbf000000`，非 0），`kalSetSuspendFlagToEMI` 有提前 `return` 保护 → §9.16 的"空指针写 EMI"方向证伪，且**不是 DMA 通道问题**。真正差异是 agui 4G 模块零 workaround 而打了 2c-2/2c-3；建议验证 EMI 挂起标志写入后摘掉 workaround 恢复真 suspend。
 
 ## 五、Windows 特注意事项（你转到 Windows）
 
@@ -105,6 +106,7 @@ port/ 已有交付物：
 3. 刷机（先备份）：进下载模式（关机→音量下+电源插 USB，或短接 test point）；先刷 Stage1 验证同 PCB 启动；dtbo 刷 Wi-Fi 原厂；刷 boot 同步禁用 vbmeta；沿用 Wi-Fi 原厂 lk.bin。
 4. 验证：进 Android、亮屏、触控/Wi-Fi/蓝牙/音频正常。排查 LCM 黑屏（lk atag 面板名 vs CONFIG_CUSTOM_KERNEL_LCM）。
 5. 视情况把更新 push 回 GitHub 仓库。
+6. 参考 `port/AGUI_4G_VENDOR_AUDIT.md` + `port/audit_agui_vendor.py`：已对照 agui 4G vendor 排除"空指针写 EMI"与"DMA 通道"两个方向，下一步验证 EMI 挂起标志写入后摘掉 2c-2/2c-3 workaround 恢复真 suspend。
 
 Windows 特别注意：脚本是 bash，用 Git Bash/WSL 运行；但刷机不要用 WSL 的 USB。Windows 原生刷机用 Python + `git clone bkerler/mtkclient` 装运行依赖 + **UsbDk** 驱动（非 Zadig/WinUSB），直接 `python mtk.py` 运行。编译已在 Actions 完成，Windows 机器主要只需刷机工具。
 
