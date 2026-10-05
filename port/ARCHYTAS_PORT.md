@@ -1072,8 +1072,141 @@ adb shell 'cat /proc/iomem | head -20'
 adb shell 'ls /sys/firmware/devicetree/base/reserved-memory/'
 ```
 
-### 9.10 CI 触发过滤：不该编的推送就别编（2026-10-04）
+### 9.12 CONSYS EMI 窗口固定：真机验证结果（2026-10-05）
+
+对应 9.11 的修复（提交 `37b50bbca Fix:WiFi STP Problem`，CI run **37200755460**，success）。
+镜像 `boot-archytas-wifi.img` sha256 `3214837a…c376021`；刷入前备份原 boot
+（`619cb20d…`，即 run 37196396706 的镜像，可随时回退），写 `/dev/block/mmcblk0p25`
+后回读 sha256 一致。真机 `/proc/device-tree/reserved-memory/consys-reserve-memory/reg`
+实测 `00 00 00 00 bf 00 00 00 00 00 00 00 00 40 00 00` → base **0xbf000000** / size
+**0x400000**，`alloc-ranges` 已消失（目录只剩
+`alignment/compatible/name/no-map/reg/size`）。DTB 仍 84094，32 MiB 预算不变。
+
+#### 结论：修复有效 —— 但墙往后挪了一层，`wlan0` 仍未出现
+
+**已消失的老 signature**（对照 9.11 记录）：
+
+| 老 signature | 现状 |
+| --- | --- |
+| `HOST_AWAKE_EVT fail(-1)` / `opfunc_pwr_sv` 失败 | 不再出现，电源握手正常 |
+| `wmt_lib_put_act_op` completion timeout | 0 次 |
+| `gRxCount != 0 (-1)`（垃圾值） | 变成 **`1`** |
+| 芯片完全不应答 | 有应答：`patch dwn:0 frag(27,516) ok`、`btif_tx:recovered,len(1000),retry_left(8)`、`SW Rst succeed`、`UTC_SYNC_CMD OK`、consys HW/FW id 均 `0x8a00` |
+
+**仍在**：`wlanProbe` 真的跑起来了（以前从没跑到），但 320 ms 后
+`FW_START EVT failed` → `glResetTrigger` → `wlanAdapterStart Fail reason:5`
+→ `wlanProbe failed reason:3`。`wmt_core_dump_func_state` 里始终 `w:0 stp:0`
+（WLAN function 从未打开）。4 个模块 insmod 全 `rc=0`，4 个 dev 节点齐全
+（`wmtWifi` 153 / `wmtdetect` 154 / `stpwmt` 190 / `fw_log_wmt` 224）。
+
+**新证据（最关键）**：固件自己报了异常 —— 芯片静音时不可能有这个：
+
+```
+stp_trace32_dump:[I] [len=116][type=5]<EXCEPTION>, Dump=25, id=0x2 WIFI,
+  isr=0x0, irq=0x12{LP=0x57484}{ITYPE=0x1}{EVA=0xF0400000}{isr_t=0}{exp_t=39134}
+```
+
+即：固件已能下载、能跑，但在 FW_START 阶段 crash。
+`EVA=0xF0400000` 在 `/proc/iomem` 里查不到（iomem 只有 `AXI-BUS 18000000-180fffff`），
+`4g_stock.dts` 里也没有这个地址 → **下一步就查这个地址属于谁**。
+与「能工作的 4G 板」A/B（同一内核、同一批 `.ko`，只换 DTB/ROM）仍是最省时的切入口。
+
+顺带记录：`halShowDmaschInfo` 的 DMA scheduler dump 显示 group15
+`rsv_cnt=0x0b0 / src_cnt=0xf70 / pktin_cnt=0x06` 且多处 `mismatch!`，
+group0~14 则全为 0 —— 若后续要查，可从这里入手。
+
+#### ⚠️ 验证时的时序陷阱（差点误判成"修复无效"）
+
+原厂 init 的 `insmod` 在 t=90.4 因 32 位模块 `Exec format error` 失败，
+而 `wmt_launcher` **t=90.7 就已给芯片上电**；手动 insmod 在 t=101.9 才注册 WLAN 回调
+⇒ 上电早于驱动，`wlanProbe` 根本没机会跑，日志里连 `wlanProbe` 都不出现。
+
+**正确顺序**：先 insmod 四个 `.ko`，确认
+`/dev/{wmtWifi,wmtdetect,stpwmt,fw_log_wmt}` 齐全，
+再 `stop wmt_launcher; start wmt_launcher` 重新上电。
+`setprop vendor.connsys.driver.ready yes` **不能**用来重试 —— 它只会再次触发
+init 那三条同样失败的 32 位 `insmod`，并把芯片 power off。
 
 ---
 
-*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*
+*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）、`peek_ko.py`（2026-10-05 临时调试用）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*
+
+### 9.13 第五个根因：`CFG_MTK_ANDROID_EMI=0` 让 EMI 固件段被静默跳过 ✅ 定位并已修（2026-10-05）
+
+**根因一句话**：wlan 模块构建时 `CFG_MTK_ANDROID_EMI` 宏默认 `0`，让
+`wlanDownloadEMISection()`（`fw_dl.c:443`）编译成 8 字节 stub，所有带
+`DOWNLOAD_CONFIG_EMI` tailer 的固件段被静默跳过 —— 芯片跑起来后
+EMI 内存还是脏的，FW_START 阶段在 `0xF0400000` crash。
+
+#### 证据链
+
+1. **stp_trace32_dump 里的 EVA 就是 EMI 窗口**：`0xF0400000` = `0xF0000000`（CONNAC
+   MCU 自己的 EMI window 基址，`/proc/iomem` 里看不到因为这是芯片内部地址空间）
+   + `0x400000`（正好是 consys-reserve-memory 的 4 MiB）。这不是随机地址，是固件
+   要读写的 EMI region 边界。
+
+2. **旧产物 .ko 里 `wlanDownloadEMISection` = 8 字节**（`MOV X0, 0; RET`）：
+
+   ```
+   wlanDownloadEMISection  GLOBAL  FUNC  sz=8   0x151380
+   kalSetEmiMpuProtection GLOBAL  FUNC  sz=4   0x154b70   ← compat_stub.c no-op
+   gConEmiPhyBaseFinal     OBJECT         sz=8   0x1a260    ← compat_stub.c 零初始化
+   gConEmiPhyBase          NOTYPE         sz=0              ← 内核符号
+   ```
+
+3. **`fw_dl.c` 源码**里 `#if CFG_MTK_ANDROID_EMI` 整个 block 包着
+   `request_mem_region + ioremap_nocache + kalMemCopy + release_mem_region`。
+   宏关掉，整块被预处理器踢掉，只留一个空函数返回 `WLAN_STATUS_SUCCESS`。
+
+4. **为什么 ADRP / consys 修完后才暴露**：STP 握手通了 → 固件下载走完
+   → EMI section 没被下载 → 固件一启动就 crash。之前 STP 还没通时，
+   这个 bug 被更早的握手超时挡住了。
+
+5. **`halShowDmaschInfo` group15 mismatch!** 旁证 —— DMA scheduler
+   也是 EMI 相关路径，没 download 自然没数据。
+
+#### 修复（`port/build_connectivity_modules.sh` step 2c + Gate #5）
+
+1. **`emi_compat.h` / `compat_stub.c` 调整**：
+   - `gConEmiPhyBaseFinal` / `gConEmiSizeFinal` 改成 `__weak`（`gl_init.c` 在
+     `#if CFG_MTK_ANDROID_EMI=1` 下自己定义强符号，我们的是 fallback）
+   - `kalSetEmiMpuProtection` / `kalSetDrvEmiMpuProtection` 继续由 compat_stub.c
+     提供（上游 MTK HAL 缺失），仍是 no-op（bootloader/conninfra 已配好 MPU）
+   - `emi_compat.h` 保持 force-include，给所有 TU 提供 extern 声明
+
+2. **Makefile 注入宏**（anchored 在 agui 的 `-Wno-error` 行）：
+   ```makefile
+   ccflags-y += -DCFG_MTK_ANDROID_EMI=1
+   ```
+
+3. **Gate #5**：strip 之后检查
+   - `wlanDownloadEMISection size > 16`（不再是 stub）
+   - `kalSetEmiMpuProtection` 符号存在（EMI 路径被引用）
+
+#### 预期修复后的旧 .ko 对比
+
+| 符号 | 旧 sz=8 (stub) | 新 sz≥100 (real) |
+| --- | --- | --- |
+| `wlanDownloadEMISection` | MOV X0,0; RET | request_mem_region + ioremap + kalMemCopy + release_mem_region |
+| `gConEmiPhyBaseFinal` | 来自 compat_stub (weak) | 来自 gl_init.c (strong) |
+| `kalSetEmiMpuProtection` | 来自 compat_stub (no-op) | 不变（HAL 仍缺），但**会被真代码调用** |
+
+#### 真机验证清单（新 .ko 刷入后）
+
+```sh
+# 1. 先确认 EMI 真的在下载
+dmesg | grep -i "EmiPhyBase\|emi.*download\|Consys emi"
+
+# 2. halShowDmaschInfo 应该不再只有 group15 有 mismatch
+dmesg | grep -A 30 "halShowDmaschInfo"
+
+# 3. 固件 FW_START 应该过
+dmesg | grep -i "FW_START\|HOST_AWAKE\|wlanProbe.*done\|axi probe.*done"
+
+# 4. 终极检查
+ip link show wlan0
+```
+
+---
+
+*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*

@@ -227,26 +227,53 @@ find "$KROOT/$CONN" -type f \( -name 'Makefile' -o -name 'Kbuild' -o -name '*.mk
     done
 
 # ---- 2c. ARCHYTAS EMI/MPU protection compat shim ------------------------
-# The Gen4M WLAN module (gl_init.c, axi.c) references gConEmiPhyBaseFinal /
-# gConEmiSizeFinal and kalSetEmiMpuProtection() (and kalSetDrvEmiMpuProtection()
-# on the non-prealloc path). On this 4.9 tree those are NOT provided: the MTK
-# HAL that defines them is absent, and the Wi-Fi reserved-memory EMI window is
-# owned by the bootloader/conninfra. agui's 0001 patch adds plat_priv.c with the
-# definitions but never wires it into the module -objs, so it is never compiled,
-# and gConEmi*Final is declared upstream only under #if CFG_MTK_ANDROID_EMI
-# (which is OFF in this build) -> 'undeclared' / implicit-function errors.
+# WHY THIS EXISTED BEFORE: The Gen4M WLAN module (gl_init.c, axi.c) references
+# gConEmiPhyBaseFinal / gConEmiSizeFinal and kalSetEmiMpuProtection() (and
+# kalSetDrvEmiMpuProtection() on the non-prealloc path).  All four are guarded
+# by `#if CFG_MTK_ANDROID_EMI` in the module source, and that macro defaulted to
+# 0 in standalone builds.  The result:
+#   - wlanDownloadEMISection() in fw_dl.c compiled to an 8-byte stub that
+#     silently returns WLAN_STATUS_SUCCESS -> EMI sections in the firmware
+#     (whose tailers have DOWNLOAD_CONFIG_EMI set) were never written -> the
+#     firmware ran with uninitialized EMI memory and crashed at EVA=0xF0400000
+#     during FW_START (observed live 2026-10-05: stp_trace32_dump type=5
+#     exception, gRxCount became 1 after the consys DTB fix, proving STP was
+#     alive but firmware memory was corrupted).
+#   - kalSetEmiMpuProtection() was only referenced inside EMI-guarded blocks,
+#     so with the macro off, the linker never even needed it.
+#   - gConEmiPhyBaseFinal / gConEmiSizeFinal were declared in gl_init.c only
+#     under #if CFG_MTK_ANDROID_EMI, so they didn't exist either.
 #
-# Fix: (a) extend the ALREADY-linked compat_stub.c with the missing symbols, and
-# (b) force-include a header that declares them into every WLAN translation unit,
-# so both gl_init.c and axi.c see the prototypes regardless of which branch is
-# compiled. The functions are intentionally no-ops: the EMI MPU policy is owned
-# by the bootloader/conninfra on this device (see agui's comment in axi.c).
+# THE FIX (2026-10-05): enable CFG_MTK_ANDROID_EMI=1 via -D in the wlan Makefile.
+# This turns EMI section download and MPU protection back on.  A few follow-ons:
+#   - gl_init.c (under the new `#if CFG_MTK_ANDROID_EMI`) now defines its OWN
+#     gConEmiPhyBaseFinal / gConEmiSizeFinal.  The compat_stub.c versions must
+#     become WEAK so the upstream strong ones win.
+#   - kalSetEmiMpuProtection / kalSetDrvEmiMpuProtection are NOT defined
+#     upstream at all (they come from a MTK HAL that this 4.9 tree lacks).
+#     compat_stub.c still provides them, but now as REAL function bodies (the
+#     module source will call them).  The MPU policy is owned by the
+#     bootloader/conninfra on this device, so no-ops are fine.
+#   - emi_compat.h stays: it declares everything, and gl_init.c now needs the
+#     extern declarations for kalSetEmi*Protection since they're not defined
+#     there.
+#
+# We inject -DCFG_MTK_ANDROID_EMI=1 via ccflags-y on the wlan Makefile, anchored
+# on the agui -Wno-error line (same trick as the -mcmodel=large injection).
+
 cat > "$WLAN_DIR/emi_compat.h" <<'EOF'
 #ifndef ARCHYTAS_EMI_COMPAT_H
 #define ARCHYTAS_EMI_COMPAT_H
 #include <linux/types.h>
+
+/* These two are defined in gl_init.c when CFG_MTK_ANDROID_EMI=1,
+ * but we still need the extern declaration for callers in axi.c / fw_dl.c
+ * who include this header instead of gl_init.c directly. */
 extern phys_addr_t gConEmiPhyBaseFinal;
 extern unsigned long long gConEmiSizeFinal;
+
+/* These two are NEVER defined upstream -- they live in the MTK HAL that this
+ * 4.9 tree lacks.  compat_stub.c provides the only implementation (no-ops). */
 extern void kalSetEmiMpuProtection(phys_addr_t emiPhyBase, bool enable);
 extern void kalSetDrvEmiMpuProtection(phys_addr_t emiPhyBase, uint32_t offset, uint32_t size);
 #endif
@@ -255,26 +282,39 @@ EOF
 cat >> "$WLAN_DIR/compat_stub.c" <<'EOF'
 
 /* ARCHYTAS EMI/MPU compat shim -- see emi_compat.h.
- * The kernel tree on this 4.9 device does not provide kalSetEmiMpuProtection
- * (it lives behind a MTK HAL that is absent); the Wi-Fi reserved-memory EMI
- * window is protected by the bootloader/conninfra, so these are no-ops. */
-phys_addr_t gConEmiPhyBaseFinal;
-unsigned long long gConEmiSizeFinal;
+ *
+ * gConEmiPhyBaseFinal / gConEmiSizeFinal:
+ *   gl_init.c defines strong versions of these under `#if CFG_MTK_ANDROID_EMI`.
+ *   We supply __weak fallbacks so the file compiles even if the macro ends up
+ *   off, while the upstream strong ones always win when it is on.
+ *
+ * kalSetEmiMpuProtection / kalSetDrvEmiMpuProtection:
+ *   The MTK HAL that provides these is absent from this kernel tree.
+ *   The bootloader/conninfra already configures the EMI MPU for the
+ *   connectivity window, so no-ops are the right answer. */
+__weak phys_addr_t gConEmiPhyBaseFinal;
+__weak unsigned long long gConEmiSizeFinal;
 void kalSetEmiMpuProtection(phys_addr_t emiPhyBase, bool enable)
 {
+    /* Bootloader owns the EMI MPU; we don't reconfigure it. */
 }
 void kalSetDrvEmiMpuProtection(phys_addr_t emiPhyBase, uint32_t offset, uint32_t size)
 {
+    /* Bootloader owns the EMI MPU; we don't reconfigure it. */
 }
 EOF
 
-# Force-include emi_compat.h into every WLAN TU. Anchor on the -Wno-error line
-# that agui's 0001 patch already inserted into the module Makefile.
+# Force-include emi_compat.h into every WLAN TU (anchored on agui's -Wno-error).
+# Also inject -DCFG_MTK_ANDROID_EMI=1 -- this is the SWITCH that turns EMI
+# section download (fw_dl.c) and MPU protection calls (axi.c, gl_init.c) back
+# on.  Without it, wlanDownloadEMISection() compiled to an 8-byte stub that
+# silently skipped EMI firmware sections, causing the firmware to crash at
+# EVA=0xF0400000 during FW_START (observed live 2026-10-05).
 if grep -q 'ccflags-y += -Wno-error' "$WLAN_DIR/Makefile"; then
-  sed -i "s|^ccflags-y += -Wno-error|ccflags-y += -Wno-error\nccflags-y += -include $WLAN_DIR/emi_compat.h|" "$WLAN_DIR/Makefile"
-  echo "   force-include emi_compat.h added to wlan Makefile"
+  sed -i "s|^ccflags-y += -Wno-error|ccflags-y += -Wno-error\nccflags-y += -include $WLAN_DIR/emi_compat.h\nccflags-y += -DCFG_MTK_ANDROID_EMI=1|" "$WLAN_DIR/Makefile"
+  echo "   force-include emi_compat.h + -DCFG_MTK_ANDROID_EMI=1 added to wlan Makefile"
 else
-  echo "WARN: -Wno-error anchor not found in wlan Makefile; emi_compat.h NOT force-included"
+  echo "WARN: -Wno-error anchor not found in wlan Makefile; EMI shims NOT injected"
 fi
 
 # ---- 2d. Force the large code model for every connectivity module -----------
@@ -843,6 +883,50 @@ else
   echo "       FAMILY (CONNAC for MT6761), not the part number."
   exit 1
 fi
+
+# Gate #5: EMI section download must be real, not stubbed out.
+# When CFG_MTK_ANDROID_EMI=0 (old broken build), wlanDownloadEMISection() in
+# fw_dl.c compiled to an 8-byte MOV+RET stub that silently returned success
+# without writing anything to the EMI region.  Firmware sections whose tailers
+# had DOWNLOAD_CONFIG_EMI set were never downloaded -> firmware ran with
+# uninitialized EMI memory -> stp_trace32_dump type=5 exception at
+# EVA=0xF0400000 during FW_START.
+#
+# With CFG_MTK_ANDROID_EMI=1 (this fix) the function does request_mem_region +
+# ioremap_nocache + kalMemCopy + release_mem_region -- its size grows from 8 to
+# ~100 bytes.  We gate on that threshold, AND that the EMI MPU stubs from
+# compat_stub.c ARE referenced by the module (proof the EMI code path is
+# actually taken).
+echo "=== EMI download gate (CFG_MTK_ANDROID_EMI=1 must be effective) ==="
+_esym=$(python3 "$PORT/elf_symbols.py" "$OUTDIR/wlan_drv_gen4m.ko" \
+       --grep '^wlanDownloadEMISection$|^kalSetEmiMpuProtection$' 2>&1) || true
+printf '%s\n' "$_esym"
+_emi_ok=true
+if printf '%s\n' "$_esym" | grep -qE '^  wlanDownloadEMISection +[A-Z]+ +FUNC'; then
+  _emi_fn=$(printf '%s\n' "$_esym" | grep -E '^  wlanDownloadEMISection +[A-Z]+ +FUNC')
+  # last field is the size -- e.g. "wlanDownloadEMISection LOCAL FUNC sz=108"
+  _sz=$(echo "$_emi_fn" | grep -oE 'sz=[0-9]+$' | cut -d= -f2)
+  echo "   wlanDownloadEMISection size = ${_sz:-?}"
+  if [ "${_sz:-0}" -le 16 ]; then
+    echo "ERROR: wlanDownloadEMISection is still a stub (size <= 16)."
+    echo "       CFG_MTK_ANDROID_EMI is not being set to 1. EMI firmware"
+    echo "       sections would be silently skipped again, crashing the"
+    echo "       firmware at EVA=0xF0400000 during FW_START."
+    _emi_ok=false
+  else
+    echo "   OK: wlanDownloadEMISection is real (size > 16)."
+  fi
+else
+  echo "ERROR: wlanDownloadEMISection symbol not found at all."
+  _emi_ok=false
+fi
+if printf '%s\n' "$_esym" | grep -qE '^  kalSetEmiMpuProtection +[A-Z]+ +FUNC'; then
+  echo "   OK: kalSetEmiMpuProtection is linked (EMI MPU path reachable)."
+else
+  echo "ERROR: kalSetEmiMpuProtection is missing."
+  _emi_ok=false
+fi
+[ "$_emi_ok" = true ] || { echo "   GATE FAIL"; exit 1; }
 
 # Hard gate for the ONLY thing that makes those modules loadable: the target
 # kernel must carry the ADRP relocation fix from step 2e. Shipping .ko files that
