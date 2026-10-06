@@ -1399,6 +1399,406 @@ ip link show wlan0                   # → state UP
 ping -c 2 192.168.1.1                # → 0% loss
 ```
 
+## 9.17 2c-2 / 2c-3 suspend workaround 的生效审计：**我们刷的其实是"干净版"**（2026-10-06）
+
+PR `audit-agui-vendor` 的结论是「agui 4G 用同一套驱动、**零 workaround** 也能正常 suspend」，因此
+怀疑我们在 `build_connectivity_modules.sh` 里多打的 **2c-2**（`gl_wext_priv.c` 跳过
+`wlanSetSuspendMode`，见 §9.16）和 **2c-3**（`wmt_dev.c` 删掉 POWERDOWN 分支的 `schedule_work`）
+是多余的。本节回答一个更基本的问题：**这两个 workaround 到底在哪些产物里真的生效了？**
+
+### 结论先行
+
+| 产物 | `wmt_fb_notifier_callback` | POWERDOWN 分支首条调用 | `priv_driver_set_suspend_mode` 内 | 2c-2 | 2c-3 |
+| --- | --- | --- | --- | --- | --- |
+| **agui 4G `vendor.img`**（参考） | 316 B | `queue_work_on` | 有 `wlanSetSuspendMode` + `p2pSetSuspendMode` | 无 | 无 |
+| CI run `37200755460`（`37b50bbca`） | 380 B | `queue_work_on` | 有 | 无 | 无 |
+| `archytas-wifi-modules-only.zip`（zip#1，**我们刷过并验证 wlan0 UP 的那版**） | 380 B | `queue_work_on` | 有 | **无** | **无** |
+| `archytas-wifi-modules-only(3).zip`（zip#3「pyfix」） | **344 B** | **`osal_warn_print`** | **两处调用都消失** | **有** ✅ | **有** ✅ |
+
+**所以：上一轮刷进机器、并据此宣布"Wi-Fi 通了"的 zip#1，是一个没有 2c-2/2c-3 的干净版。**
+它能通靠的是内核侧修复（DTB `consys-reserve-memory` 固定 §9.11/9.12 + `CFG_MTK_ANDROID_EMI=1`
+§9.13），与这两个 workaround 无关。而 zip#1 刷完后出现的 `wait main_thread timeout × 12`
+死锁，正是 2c-2 本该压住的那条路径 —— 两者自洽。
+
+### 时间线自洽性
+
+```
+16:06  zip#1  f436f2e0   ← 刷入验证（无 2c-2/2c-3）
+16:57  commit 97c25f1cd  fix(wifi): patch priv_driver_set_suspend_mode ... (2c-2)
+17:25  commit 83e238143  fix(wmt): patch wmt_fb_notifier_callback ...       (2c-3)
+18:55  zip#2  f436f2e0   ← 字节未变：此时 2c-2/2c-3 的 sed patch 未生效
+19:00  commit 03c000ef2  fix(build): replace fragile sed w/ python ...
+19:04  zip#3  1acc8df6   ← 变了：python patch 生效，两个 workaround 都打上
+```
+
+即 **`83e238143` 的初版用 `sed` 实现，未在产物里生效**（18:55 的 zip#2 与 16:06 的 zip#1 逐字节
+相同），所以才有了 19:00 的 `03c000ef2`（改 python heredoc）和 19:04 才真正带 patch 的 zip#3。
+
+### 判据：为什么不能用字符串 / 符号表 / relocation 计数
+
+三条路都试过，全部无效，记下来避免重蹈：
+
+1. **字符串**：anchor `@@@@@@@@@@wmt enter early POWERDOWN` 是 `WMT_WARN_FUNC` 的格式串，patch 只
+   删它**下一行**，字符串永远在。
+2. **符号 DEFINED/UNDEF**：`queue_work_on` 在三种状态下都是 UNDEF（模块引用内核导出），区分不了。
+3. **relocation 计数**（一度以为的"决定性判据"）：`schedule_work()` 是 inline 包装，
+   `queue_work_on` 每个调用点一条 CALL26 reloc —— **但 GCC 的 tail-merge 会把 UNBLANK 和
+   POWERDOWN 两个完全相同的 `schedule_work(); break;` 折叠成同一个块**，所以**pristine 版也
+   只有 1 条**。实测 agui（公认 pristine）和 zip#1（pristine）都是 1 条，且是同一条。
+
+**唯一可靠的判据是 POWERDOWN 分支自己调用了什么。** switch 编译成
+`cmp wN,#0; b.eq unblank` / `cmp wN,#4; b.ne default`，所以 **`cmp wN,#4` 紧跟 `b.ne` 就是
+POWERDOWN 分支头**，其第一条 BL：
+
+- pristine → `bl queue_work_on`（就是那个 `schedule_work`）
+- patched → `bl osal_warn_print`，随后无条件跳回 epilogue（`mov w0,#0; ret`）
+
+**自证**：agui 参考版（文档明确"零 workaround"）被本判据判为 PRISTINE，与预期一致。
+
+zip#1 反汇编片段（POWERDOWN 分支，`cmp w19,#4` 于 `0x49194`）：
+
+```
+0x491b4/0x491b8/0x491bc:  atomic_set(1,0,0)      ← POWERDOWN 标志
+0x491c0:  cbnz w1, 0x49284
+0x491d8:  bl   queue_work_on                     ★ 仍然 schedule_work → 未 patch
+```
+
+zip#3 同一位置：
+
+```
+0x491b4/0x491b8/0x491bc:  atomic_set(1,0,0)
+0x491c0:  cbz  w1, 0x49174
+0x491d8:  bl   osal_warn_print                   ← 只剩 WMT_WARN_FUNC 日志
+0x491dc:  b    0x49174                            ★ 直接返回 → 已 patch
+```
+
+### 新增工具
+
+- **`port/extract_modules.py`** —— 从裸 ext4 `vendor.img` 提取 `.ko`。既有 `ext4_read.py` 的
+  `cat` 只能出文本，未 strip 的 54 MB `.ko` 会按 UTF-8 解码失败。
+- **`port/audit_wmt_fb_workaround.py`** —— 2c-3 判定（POWERDOWN 分支首条调用）。
+- **`port/disasm_arm64.py`** —— 极简 AArch64 线性反汇编（定长 32 位，逐 4 字节步进即可），
+  标注 B/BL/B.cond/CBZ/RET/ADRP 并解析 BL 的 reloc 符号名。两个脚本共用
+  `audit_wmt_fb_workaround.ElfRel`。
+
+写脚本时踩的坑（都已注释进代码）：`Elf64_Shdr` 字段序写错会静默读到垃圾；**ELF64 的
+`r_info` 是 `(sym << 32) | type`，与 ELF32 相反**，写反则符号名全空、匹配数恒为 0；
+`.shstrtab` 依赖**后缀共享**，用"段起点"字典查 `sh_name` 会漏掉 `.text`（它是 `.rela.text`
+的子串）而让所有 section 失去名字。
+
+### 待定
+
+- agui 4G 两个 workaround 都没有也能正常工作，而 zip#1（同样没有）却出现 `main_thread`
+  死锁 —— 说明差异不在"是否有 workaround"，而在别处（EMI 映射方式？芯片状态？）。若要真正
+  对齐 agui，应先解释这个差异，再决定 2c-2/2c-3 的去留。
+- zip#3（同时带 2c-2 + 2c-3）尚未真机验证。
+
+## 9.18 agui 方案的验证：**workaround 与这个死锁无关**，真凶是 scan-done 里的无出口循环（2026-10-06）
+
+### 9.18.1 设备上装的到底是哪版（哈希级确证）
+
+用户把模块直接换进了 vendor 分区。核对结果：
+
+| 位置 | 时间戳 | `wmt_drv.ko` | `wlan_drv_gen4m.ko` |
+|---|---|---|---|
+| `/vendor/lib/modules/`（设备） | 2026-10-05 19:04 | `1acc8df6…` | `e2ee1fe4…` |
+| `_ci/latest_modules_pyfix/`（主机，zip#3） | — | `1acc8df6…` | `e2ee1fe4…` |
+
+**逐字节相同 ⇒ 设备运行的就是 zip#3**（2c-2 + 2c-3 都已生效，见 §9.17）。
+加载路径也确认了，原厂 init 就是读 vendor：
+
+```
+/vendor/etc/init/init.wmt_drv.rc : on boot                              → insmod wmt_drv.ko
+/vendor/etc/init/init.wlan_drv.rc: on property:vendor.connsys.driver.ready=yes
+                                   → insmod wmt_chrdev_wifi.ko
+                                   → insmod wlan_drv_${ro.vendor.wlan.gen}.ko   # gen4m
+                                   → start wlan_assistant
+```
+
+> 顺带印证了 **agui 的 vendor-lib64 方案本身是成立的**：arm64 `.ko` 放进
+> `/vendor/lib/modules/` 后，开机 init 自动 insmod 成功，不再出现 32 位模块的
+> `Exec format error`，`vendor.connsys.driver.ready=yes`、4 个模块与 4 个 dev 节点齐全。
+
+### 9.18.2 正常路径：Wi-Fi 完全可用 ✅
+
+干净开机（未做任何手工 insmod）：
+
+```
+wlanProbe → wlanAdapterStart → wlanDownloadEMISection: EmiPhyBase:0xbf000000 offset:0x177000 ioremap 0x400000
+                             → EmiPhyBase:0xbf000000 offset:0x1e5000 ioremap 0x400000
+          → wlanConfigWifiFunc: FW_START EVT success!!
+          → wlanProbe: probe success, feature set: 0x84881418
+          → wmt_func_wifi_on: wmt call wlan probe ok
+```
+
+`svc wifi enable` 后实测：
+
+| 项 | 结果 |
+|---|---|
+| `wlan0` | `<BROADCAST,MULTICAST,UP,LOWER_UP> state UP` |
+| 地址 | `inet 192.168.1.61/24`（另一次为 `192.168.1.62`），路由/`net.dns1=192.168.1.1` |
+| ping 网关 | 3/3，0% loss |
+| ping 公网 `223.5.5.5` | 3/3，0% loss |
+| `main_thread` | state=`S`，`stime` 2s 内只 +1（空闲） |
+| `wait main_thread timeout` | **0 次** |
+
+### 9.18.3 但一个动作就把控制面打死，且 **100% 可复现** ⚠️
+
+`svc wifi disable`（本地断开）之后立刻：`main_thread` 变 `state=R`，`stime` 以
+**≈100 ticks/s（满核）**增长、`nvcsw=nivcsw=0`（从不睡眠），`wlan0` 消失、拿不到 IP，
+所有 OID 卡死 30.72 s：
+
+```
+[ 177.121482] (3)[1244:wpa_supplicant][wlan]kalIoctlByBssIdx:(OID WARN) wait main_thread timeout, duration:31261ms
+[ 177.121503] (3)[1244:wpa_supplicant][wlan]mtk_cfg80211_del_key:(RSN WARN) remove key error:c0000001
+[ 207.841481] (0)[1474:kworker/u8:23][wlan]kalIoctlByBssIdx:(OID WARN) wait main_thread timeout, duration:30720ms
+```
+
+触发链（dmesg 原文，t=145.859）：
+
+```
+mtk_cfg80211_disconnect:(REQ INFO) ucBssIndex = 0
+kalIndicateStatusAndComplete:(INIT INFO) [wifi] wlan0 netif_carrier_off
+kalIndicateStatusAndComplete:(INIT INFO) [wifi]Indicate disconnection: Reason=0 Locally[1]
+aisFsmRunEventAbort:(AIS STATE) [0] EVENT-ABORT: Current State NORMAL_TR, ucReasonOfDisconnect:8
+        ↓ 随后 main_thread 进入 scan-done 处理 → 死循环，永不返回
+```
+
+### 9.18.4 空转位置：`sysrq` NMI 回栈直接钉死
+
+`echo l > /proc/sysrq-trigger`（需 root）连续 4 次采样，PC 全部落在同一处：
+
+```
+[<ffffff800109b904>] scanGetCurrentEssChnlList+0x134/0x5b0 [wlan_mt6761_axi]
+[<ffffff800109b918>] scanGetCurrentEssChnlList+0x148/0x5b0 [wlan_mt6761_axi]
+[<ffffff800109b91c>] scanGetCurrentEssChnlList+0x14c/0x5b0 [wlan_mt6761_axi]
+   ↑ 调用者
+[<ffffff8001056134>] aisFsmRunEventScanDone+0x304/0x550     [wlan_mt6761_axi]
+[<ffffff800106bf4c>] mboxRcvAllMsg+0xfc/0x2c0               [wlan_mt6761_axi]
+[<ffffff8000f76194>] wlanProcessMboxMessage+0x14/0x70       [wlan_mt6761_axi]
+[<ffffff8000fd4250>] kalProcessTxReq+0x40/0x2a0             [wlan_mt6761_axi]
+[<ffffff8000fde680>] main_thread+0x820/0xef0                [wlan_mt6761_axi]
+[<ffffff80080ce6c0>] kthread+0xfc/0x100
+```
+
+反汇编 `scanGetCurrentEssChnlList`（文件偏移 0x12c7d0 起），**+0x130…+0x158 是一个没有出口的循环**：
+
+```
+0x12c900: a9410402  LDP   x2, x1, [x0, #16]     ; 取 next / prev
+0x12c904: b4000042  CBZ   x2, 0x12c90c
+0x12c908: f9000441  STR   x1, [x2, #8]         ; unlink
+0x12c90c: b4000041  CBZ   x1, 0x12c914
+0x12c910: f9000022  STR   x2, [x1]             ; unlink
+0x12c914: b94012e1  LDR   w1, [x23, #0x10]     ; 计数器
+0x12c918: a9017c1f  STP   xzr, xzr, [x0, #16]  ; 清空节点
+0x12c91c: 51000421  SUB   w1, w1, #1
+0x12c920: b90012e1  STR   w1, [x23, #0x10]
+0x12c924: 17fffff7  B     0x12c900             ; ← 无条件回跳；x0 永不前进
+```
+
+`0x12c924` 编码 `000101` = **无条件 `B`**（imm26 符号扩展 = −0x24），循环体内**没有任何出口分支**
+（两个 `CBZ` 只跳过 2 条指令）。而且 `x0` 在循环里从不被写 —— 每次都摘同一个节点、
+计数器一直往下减。**进得去，出不来**。
+
+### 9.18.5 决定性对照：workaround 碰不到这条路径
+
+对同一函数取函数体字节哈希：
+
+| 构建 | `scanGetCurrentEssChnlList` | `aisFsmRunEventScanDone` |
+|---|---|---|
+| **agui 4G（参考）** | 1364 B `26334e27…` | 1196 B `e1afe827…` |
+| zip#1（**无** workaround） | 1388 B `7fd77484…` | 1268 B `87248304…` |
+| CI `37200755460`（**无** workaround） | 1388 B `7fd77484…` | 1268 B `87248304…` |
+| zip#3（**有** workaround，设备上装的） | 1388 B `7fd77484…` | 1268 B `87248304…` |
+
+**有无 workaround，这两个函数字节完全一致** ⇒ 2c-2/2c-3 无论打与不打，
+这条死循环都在。动态侧也吻合：zip#1（§9.16 时段）与 zip#3（本节）**都卡死**。
+
+**附加线索**：agui 参考版同一函数里**不存在这种微型无出口循环** ——
+它全部 11 条无条件回边的最小循环体是 **25 条指令 / 100 B**；我们最小的那条就是
+**9 条指令 / 36 B**（即 0x12c900 那个）。这是与 agui 的**真实代码差异**，值得下一步 A/B。
+
+### 9.18.6 逐条核对 agui 审计文档 §6 的三步
+
+| agui §6 | 期望 | 实测 | 判定 |
+|---|---|---|---|
+| ① 跑四项不变量，确认与 agui 一致 | 四项 PASS | `gConEmiPhyBase` = **UNDEF**（吃内核 consys `0xbf000000` 导出）✅；`wlanDownloadEMISection` = 556 B 真实现且开机真跑（日志可见）✅；`priv_driver_set_suspend_mode` = 552 B（**2c-2 已替换**）❌；`wmt_fb_notifier_callback` = 344 B（**2c-3 已删 work**）❌ | 2/4 一致，2 项偏离 |
+| ② 摘掉 2c-2/2c-3 恢复真 suspend | 死锁消失 | **前提不成立**：死锁点在 scan-done 路径，与 suspend/POWERDOWN 无关；有无 workaround 该路径字节相同，两种版本都卡死 | ❌ 证伪 |
+| ③ 若仍卡死，回协议层抓 `main_thread` 时序 | — | **正确**：真凶就是驱动自己的 scan-done 处理死循环 | ✅ |
+
+结论：**"卡死 = 我们多打两个 workaround" 这个假设，对本失败模式不成立。**
+workaround 的去留可各自独立评估（它们是 suspend 路径的事），但不能指望摘掉它治好这个死锁。
+
+### 9.18.7 复现与恢复
+
+```bash
+# 复现（干净开机、Wi-Fi 已连上并拿到 IP 之后）
+adb shell svc wifi disable            # 本地断开
+sleep 12
+adb shell svc wifi enable
+# 现象：main_thread state=R、stime 满核增长、wlan0 消失、kalIoctlByBssIdx 30.72s 超时
+adb shell 'echo l > /proc/sysrq-trigger'   # NMI 回栈，PC 落在 scanGetCurrentEssChnlList+0x134
+
+# 恢复：只能重启（驱动控制面不会自愈）
+adb reboot
+```
+
+**下一手建议**：拿 agui 4G 的 `scanGetCurrentEssChnlList`（未 strip，符号齐全）与我们逐指令 diff，
+确认 agui 版本是否有正确出口；再决定是源码侧重编、还是把 agui 的扫描路径逻辑移植过来。
+`wlan-core @ ba2c5a5` 就是我们用的上游，先比 agui 用的那一版。
+
+> **已执行 → 见 §9.19**：diff 做完了，agui 版有正确出口（条件回边 + 重载），我们全部 artifact 都没有；
+> 根因是缺 `-mpc-relative-literal-loads`，已修并加了门禁。
+
 ---
 
-*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）、`build_connectivity_modules.sh`（2026-10-04 重写）、`verify_build_script.py`（Gate #1-5）、`install_wifi_modules.sh`（vendor 分区自动加载）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*
+## 9.19 真凶定案并修复：**缺 `-mpc-relative-literal-loads`** 让 GCC 11.4.0 把 drain 循环编成死循环（2026-10-06）✅ 已修
+
+§9.18 把空转 PC 钉死在 `scanGetCurrentEssChnlList` 里，但只证明"workaround 与它无关"。
+本节把它**做完**：拿到源码、逐指令对比 agui 参考版、定出**编译配置**根因，并落成三处改动。
+
+### 9.19.1 逐指令 diff：agui 有出口，我们**没有**
+
+用 `port/audit_scan_loop.py`（新，Capstone 判据的轻量版）扫我们**全部 10 份历史 artifact**：
+
+| artifact | 回边 | 循环体内 64-bit LDR 重载 | 判定 |
+| --- | --- | --- | --- |
+| `37190391324` / `37193565582`（build #早期） | `B` 无条件 → 0x12c7d0 | **无** | BROKEN |
+| `37194238796` / `37196396706` / `37200755460` | `B` 无条件 → 0x12c7e0 | **无** | BROKEN |
+| `modules-only-20261005_160637`（zip#1）/ `latest_modules` | `B` 无条件 → 0x12c910 | **无** | BROKEN |
+| `latest_modules_suspend` / `_powerdown` / `_pyfix`（zip#3，**设备上装的**） | `B` 无条件 → 0x12c900 | **无** | BROKEN |
+| **`agui-4g-ko`（参考版）** | **`B.cond` → 0x111c00** | **`f9400321` = `ldr x1,[head]`** | **GOOD** |
+
+即：**这不是某一次构建的偶发，而是我们工具链下 100% 确定性的误编**；agui 版是好的。
+
+### 9.19.2 源码：循环本身完全正确
+
+`wlan-core @ ba2c5a5`（就是脚本钉的那一版，已 clone 核对 `HEAD=ba2c5a57f…`），
+`mgmt/ap_selection.c:1091` `scanGetCurrentEssChnlList()`：
+
+```c
+	while (!LINK_IS_EMPTY(prCurEssLink)) {
+		prBssDesc = LINK_PEEK_HEAD(prCurEssLink,
+			struct BSS_DESC, rLinkEntryEss[ucBssIndex]);
+		LINK_REMOVE_KNOWN_ENTRY(prCurEssLink,
+			&prBssDesc->rLinkEntryEss[ucBssIndex]);
+	}
+```
+
+`include/link.h` 里三条宏展开后：
+
+```c
+	struct LINK { struct LINK_ENTRY *prNext, *prPrev; uint32_t u4NumElem; };  /* 24 B */
+	/* LINK_IS_EMPTY   */ head->prNext == (struct LINK_ENTRY *)head
+	/* LINK_PEEK_HEAD */ head->prNext == head ? NULL : ENTRY_OF(head->prNext, …)
+	/* LINK_REMOVE_KNOWN_ENTRY */ { linkDel(entry); head->u4NumElem--; }
+```
+
+关键点：`linkDel()`（内联）在**删链表首元素时会写 `head->prNext`**，而本循环每次都删首元素 ——
+也就是 `LINK_PEEK_HEAD` 的 `head->prNext` **绝不是循环不变量**。
+
+### 9.19.3 反汇编（Capstone，权威读法）
+
+我们（`latest_modules_pyfix`，`0x12c8d4` 起）：
+
+```
+0x12c8dc  ldr  x1, [x0, #0x178]   ; x1 = head->prNext —— 在循环外只读一次
+0x12c8e4  cmp  x1, x23            ; LINK_IS_EMPTY
+0x12c8e8  b.eq 0x12c928
+0x12c8f4  add  x0, x0, #0x10
+0x12c8f8  sub  x0, x1, x0
+0x12c8fc  add  x0, x0, x22        ; x0 = head->prNext - 16，算一次就再也不算
+0x12c900  ldp  x2, x1, [x0, #0x10]; entry->prNext / entry->prPrev
+0x12c904  cbz  x2, …
+0x12c908  str  x1, [x2, #8]
+0x12c90c  cbz  x1, …
+0x12c910  str  x2, [x1]
+0x12c914  ldr  w1, [x23, #0x10]   ; ★ w1 = u4NumElem，把走链指针 x1 覆盖掉
+0x12c918  stp  xzr, xzr, [x0, #0x10]
+0x12c91c  sub  w1, w1, #1
+0x12c920  str  w1, [x23, #0x10]
+0x12c924  b    0x12c900           ; ★ 无条件回边，没有重载、没有出口
+```
+
+`stp xzr,xzr,[x0,#0x10]` 把 `entry->prNext/prPrev` 清零后，第二趟 `ldp` 读出 `x2=x1=0`，
+两个 `cbz` 全部跳过，只剩"把 `u4NumElem` 每次减 1" —— **x0 永不前进，循环永不结束**。
+与 NMI 四次回栈全部命中 `0x12c900`、`main_thread` 满核空转完全吻合。
+
+agui（`0x111bdc` 起）：
+
+```
+0x111be0  cmp  x1, x25
+0x111be4  b.eq 0x111c3c
+0x111be8  mov  w3, w27
+0x111bec  add  x4, x3, #1
+0x111bf0  lsl  x3, x3, #4
+0x111bf4  lsl  x4, x4, #4
+0x111c00  sub  x0, x1, x4          ; ← 循环头：每趟重算
+0x111c04  cbz  x1, 0x111fd0        ; ← （panic 保护）
+0x111c08  add  x0, x0, x3
+0x111c0c  ldp  x2, x1, [x0, #0x10]
+   … 照旧 unlink …
+0x111c20  ldr  x1, [x25]           ; ★ 重载 head->prNext
+0x111c24  stp  xzr, xzr, [x0, #0x10]
+0x111c28  ldr  w0, [x25, #0x10]
+0x111c2c  sub  w0, w0, #1
+0x111c30  str  w0, [x25, #0x10]
+0x111c34  subs xzr, x1, x25
+0x111c38  b.ne 0x111c00            ; ★ 条件回边
+```
+
+### 9.19.4 根因：**编译配置**，不是算法
+
+| | agui 参考版 | 我们（全部 artifact） |
+| --- | --- | --- |
+| 编译器 | `GNU C89 14.2.0`（ubuntu-24.04） | **`GNU C89 11.4.0`**（CI `runs-on: ubuntu-22.04`） |
+| `DW_AT_producer` 里的 codegen 开关 | `-mpc-relative-literal-loads -mcmodel=large … -fno-pic` | **`-mcmodel=large -fno-pic -fstack-protector`（缺前者）** |
+| `R_AARCH64_ADR_PREL_PG_HI21(275)` 计数 | **0** | **28021** |
+
+证据来源：CI 日志里 `report_relocs()` 自己打印的一行（run `37200755460`）
+
+```
+wlan_drv_gen4m.ko      ADRP(275/276) = 28021  codegen: -mcmodel=large -fno-pic -fstack-protector
+```
+
+内核**本来就打算两个都给**：`arch/arm64/Makefile:81` 用 `KBUILD_CFLAGS_MODULE` 给 `-mcmodel=large`，
+紧邻的 `:62` 由 `$(call cc-option, -mpc-relative-literal-loads)` 给第二个。
+`-mpc-relative-literal-loads` 的作用正是让 GCC 走 **PC-relative 字面量池**（`ldr xN, .Lpool`），
+而不是 ADRP + GOT 槽间接寻址。少了它，我们等于跑在**内核从未测试过的组合**下，代价有两笔：
+
+1. **28021 个 ADRP 重定位** → 才需要 §8.2/§8.3 里那套"改内核 loader"的手术（`patch_adrp_reloc.py`）；
+   agui 是 0，根本不需要。
+2. **至少一个循环被误编成死循环**（本节）。
+
+### 9.19.5 修复：三处（`port/build_connectivity_modules.sh`）
+
+1. **step 2d-2（根因对齐）**：把 `-mpc-relative-literal-loads` 显式注入四个模块 Makefile 的
+   `ccflags-y` / `subdir-ccflags-y`，并加进 wlan 模块的 `KCFLAGS`，与 agui 的配置完全一致。
+   幂等标记 `ARCHYTAS_PC_REL_LITERAL`。
+2. **step 2c-4（源码侧保险）**：在 `mgmt/ap_selection.c` 的 drain 循环体末尾插一行
+   `__asm__ __volatile__("" ::: "memory");`（内存屏障），幂等标记 `ARCHYTAS_SCAN_DRAIN_BARRIER`。
+   内存 clobber 是硬屏障，任何编译器都**不允许**把内存读跨越它 —— 于是 `head->prNext` 每趟必重读，
+   循环必然终止。**这条不依赖代码模型**：即使标志将来回退，这个循环也不会再变成死循环。
+3. **Gate #6（防回归）**：构建收尾跑 `port/audit_scan_loop.py` 读**已 strip 的出货字节**，
+   要求"条件回边 + 循环体内 64-bit LDR 重载"同时成立，否则 `exit 1`。
+   这类缺陷**不会**在符号检查/加载/联网阶段暴露（模块能加载、能连、能跑流量，只在 drain 时卡死），
+   只有读指令才能发现，所以必须做成硬门禁。
+
+### 9.19.6 副作用与收益
+
+- ADRP 重定位应从 28021 掉到 **0**（其余三个模块同理：`wmt_drv` 9217、`wmt_chrdev_wifi` 197、`bt_drv` 161）。
+  产出物将**不再依赖**内核侧的 ADRP 补丁；§8.3 的 `patch_adrp_reloc.py` **保留**作为安全网（无 ADRP 时是空操作）。
+- 构建日志里 `report_relocs()` 的 `codegen:` 行应出现 `-mpc-relative-literal-loads`，这就是"根因已消除"的判据。
+
+### 9.19.7 验证判据（离线即可判定，不必等真机）
+
+```bash
+python port/audit_scan_loop.py <新 artifact>/wlan_drv_gen4m.ko   # 必须 GOOD，退出码 0
+python port/disasm_capstone.py scanGetCurrentEssChnlList <ko> --lo <loop> --hi <loop+0x40>
+```
+真机侧复现步骤仍是 §9.18.7（`svc wifi disable` → 观察 `main_thread` 是否还在满核空转；
+`echo l > /proc/sysrq-trigger` 看 PC 是否还落在 `scanGetCurrentEssChnlList`）。
+
+---
+
+*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）、`build_connectivity_modules.sh`（2026-10-04 重写）、`verify_build_script.py`（Gate #1-6）、`install_wifi_modules.sh`（vendor 分区自动加载）、`extract_modules.py`（裸 ext4 提 .ko，2026-10-06 增）、`audit_wmt_fb_workaround.py` + `disasm_arm64.py`（workaround 生效审计，2026-10-06 增）、`audit_scan_loop.py`（drain 循环出口门禁，2026-10-06 增）、`disasm_capstone.py`（Capstone 权威反汇编，2026-10-06 增）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*

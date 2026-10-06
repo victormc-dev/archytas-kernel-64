@@ -374,6 +374,92 @@ else
   echo "WARN: wmt_dev.c POWERDOWN anchor not found; early POWERDOWN NOT patched"
 fi
 
+# ---- 2c-4. Make scanGetCurrentEssChnlList()'s list drain un-miscompilable ----
+# THE BUG (observed live 2026-10-06): `svc wifi disable` hangs the whole Wi-Fi
+# control plane.  sysrq-NMI backtraces pin the spinning PC to
+# scanGetCurrentEssChnlList+0x130 in the SHIPPED module, and the cause is a
+# codegen defect, not a logic error -- the source loop is correct:
+#
+#     while (!LINK_IS_EMPTY(prCurEssLink)) {
+#         prBssDesc = LINK_PEEK_HEAD(prCurEssLink, struct BSS_DESC,
+#                                    rLinkEntryEss[ucBssIndex]);
+#         LINK_REMOVE_KNOWN_ENTRY(prCurEssLink,
+#                                 &prBssDesc->rLinkEntryEss[ucBssIndex]);
+#     }
+#
+# LINK_PEEK_HEAD() re-reads head->prNext, and LINK_REMOVE_KNOWN_ENTRY() ->
+# linkDel() WRITES head->prNext (when the entry is first in the list, which is
+# exactly the case the loop always picks).  The value is therefore NOT loop
+# invariant.  Our GCC 11.4.0 build nevertheless hoisted the read out of the
+# loop and compiled the back-edge as an unconditional branch with nothing left
+# to test:
+#
+#     0x12c8dc  ldr  x1, [x0, #0x178]   ; x1 = head->prNext, read ONCE, outside
+#     ...
+#     0x12c900  ldp  x2, x1, [x0, #0x10]; entry->prNext / entry->prPrev
+#     0x12c904  cbz  x2, ...
+#     0x12c908  str  x1, [x2, #8]
+#     0x12c90c  cbz  x1, ...
+#     0x12c910  str  x2, [x1]
+#     0x12c914  ldr  w1, [x23, #0x10]   ; w1 = u4NumElem -- CLOBBERS the walk ptr
+#     0x12c918  stp  xzr, xzr, [x0, #0x10]
+#     0x12c91c  sub  w1, w1, #1
+#     0x12c920  str  w1, [x23, #0x10]
+#     0x12c924  b    0x12c900           ; NO reload, NO exit -> spins forever
+#
+# `port/audit_scan_loop.py` detects exactly this shape (conditional back-edge +
+# a 64-bit LDR reload in the body).  agui's reference build has both
+# (`b.ne` + `ldr x1, [x25]`); every one of our artifacts has neither.
+#
+# FIX: a compiler barrier at the end of the body.  `asm volatile ("" ::: "memory")`
+# is a hard memory clobber, so no compiler may keep a memory value live across
+# it -- the head pointer is re-read on every pass and the loop terminates.  This
+# is deliberately independent of step 2d-2's flag alignment: even if the code
+# model ever regresses, this loop cannot become an infinite one again.
+# Gate #6 below fails the build if the shipped bytes do not show the fix.
+SCAN_FILE="$WLAN_DIR/mgmt/ap_selection.c"
+if [ -f "$SCAN_FILE" ]; then
+  python3 - "$SCAN_FILE" <<'PYEOF'
+import sys
+path = sys.argv[1]
+MARK = 'ARCHYTAS_SCAN_DRAIN_BARRIER'
+src = open(path, 'r', encoding='utf-8', errors='ignore').read()
+if MARK in src:
+    print('   already patched: scanGetCurrentEssChnlList drain barrier')
+    raise SystemExit(0)
+fn = src.find('void scanGetCurrentEssChnlList(')
+if fn < 0:
+    print('WARN: scanGetCurrentEssChnlList() not found; drain barrier NOT added')
+    raise SystemExit(0)
+call = src.find('LINK_REMOVE_KNOWN_ENTRY(prCurEssLink,', fn)
+if call < 0:
+    print('WARN: LINK_REMOVE_KNOWN_ENTRY(prCurEssLink, ...) not found; NOT patched')
+    raise SystemExit(0)
+end = src.find(');', call)
+if end < 0:
+    print('WARN: unterminated LINK_REMOVE_KNOWN_ENTRY(); NOT patched')
+    raise SystemExit(0)
+end += 2
+line_start = src.rfind('\n', 0, call) + 1
+indent = src[line_start:call]
+indent = indent[:len(indent) - len(indent.lstrip())]
+ins = (
+    '\n'
+    + indent + '/* ' + MARK + ': see step 2c-4 in build_connectivity_modules.sh.\n'
+    + indent + ' * GCC 11.4.0 (with -mcmodel=large but WITHOUT\n'
+    + indent + ' * -mpc-relative-literal-loads) hoisted the head->prNext read out of\n'
+    + indent + ' * this loop and emitted an unconditional back-edge, so the drain\n'
+    + indent + ' * never terminated and `svc wifi disable` deadlocked the Wi-Fi\n'
+    + indent + ' * control plane.  A memory clobber forces the re-read. */\n'
+    + indent + '__asm__ __volatile__("" ::: "memory");'
+)
+open(path, 'w', encoding='utf-8').write(src[:end] + ins + src[end:])
+print('   patched scanGetCurrentEssChnlList: drain-loop compiler barrier')
+PYEOF
+else
+  echo "WARN: $SCAN_FILE missing; drain barrier NOT added"
+fi
+
 # ---- 2d. Force the large code model for every connectivity module -----------
 # WHY: the target kernel is built with CONFIG_ARM64_ERRATUM_843419=y
 # (Cortex-A53 erratum), which selects CONFIG_ARM64_MODULE_CMODEL_LARGE and makes
@@ -412,6 +498,50 @@ for mf in "$KROOT/$CONN/common/Makefile" \
     printf 'subdir-ccflags-y += -mcmodel=large\n'
   } >> "$mf"
   echo "   injected -mcmodel=large into $mf"
+done
+
+# ---- 2d-2. Same for -mpc-relative-literal-loads (THE REAL CODEGEN FIX) ------
+# `-mcmodel=large` on its own is NOT the configuration the kernel intends.
+# arch/arm64/Makefile pairs it with
+#     KBUILD_CFLAGS += $(call cc-option, -mpc-relative-literal-loads)
+# and that second flag is what makes GCC reach a symbol through a PC-relative
+# literal pool (`ldr xN, .Lpool`) instead of an ADRP + GOT-slot indirection.
+#
+# MEASURED, and the reason this step exists at all:
+#   * our build #ed artifacts carry DW_AT_producer
+#         ... -mcmodel=large -mabi=lp64 -g -O2 ... -fno-pic -fstack-protector
+#     i.e. WITHOUT -mpc-relative-literal-loads, and 28021 x R_AARCH64_ADR_PREL_
+#     PG_HI21 (275) relocations in wlan_drv_gen4m.ko alone;
+#   * agui's reference wlan_drv_gen4m.ko carries DW_AT_producer
+#         GNU C89 14.2.0 ... -mpc-relative-literal-loads -mcmodel=large ...
+#     and ZERO ADRP relocations.
+# The missing flag is a configuration the kernel never exercises, and GCC 11.4.0
+# miscompiles under it: see step 2c-4 for the infinite loop it produced in
+# scanGetCurrentEssChnlList().  With the flag present the module needs no ADRP
+# relocation at all, which also de-risks the kernel-side step 2e patch (it stays
+# in place as a safety net, but should now find nothing to do).
+echo ">> force -mpc-relative-literal-loads in module Makefiles"
+for mf in "$KROOT/$CONN/common/Makefile" \
+          "$KROOT/$CONN/wlan/Makefile" \
+          "$KROOT/$CONN/wlan/adaptor/Makefile" \
+          "$KROOT/$CONN/bt/Makefile"; do
+  if [ ! -f "$mf" ]; then
+    echo "WARN: module Makefile not found: $mf"
+    continue
+  fi
+  if grep -q 'ARCHYTAS_PC_REL_LITERAL' "$mf"; then
+    echo "   already patched: $mf"
+    continue
+  fi
+  {
+    printf '\n# ARCHYTAS_PC_REL_LITERAL --- injected by port/build_connectivity_modules.sh\n'
+    printf '# arch/arm64/Makefile intends "-mcmodel=large + -mpc-relative-literal-loads".\n'
+    printf '# Without the second flag GCC 11 falls back to ADRP/GOT addressing (28021\n'
+    printf '# unsupported RELA 275 in the wlan core) and miscompiles at least one loop.\n'
+    printf 'ccflags-y += -mpc-relative-literal-loads\n'
+    printf 'subdir-ccflags-y += -mpc-relative-literal-loads\n'
+  } >> "$mf"
+  echo "   injected -mpc-relative-literal-loads into $mf"
 done
 
 # ---- 2e. Let the module loader process ADRP relocations (THE ADRP FIX) -----
@@ -603,7 +733,7 @@ build_mod() {
   rm -rf "$KOUT/$CONN/$d"
   make -C "$KROOT" O="$KOUT" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" \
        HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" \
-       KCFLAGS="-mcmodel=large -Wno-error -include $WLAN_DIR/emi_compat.h" \
+       KCFLAGS="-mcmodel=large -mpc-relative-literal-loads -Wno-error -include $WLAN_DIR/emi_compat.h" \
        AUTOCONF_H="$AUTOCONF" KERNEL_OUT="$KOUT" TOP="$KROOT" \
        KBUILD_MODPOST_FAIL_ON_WARNINGS= \
        M="$CONN/$d" "$@" modules -j"$JOBS"
@@ -992,6 +1122,32 @@ else
   _emi_ok=false
 fi
 [ "$_emi_ok" = true ] || { echo "   GATE FAIL"; exit 1; }
+
+# Gate #6: scanGetCurrentEssChnlList()'s list drain must be able to terminate.
+#
+# This loop is the reason `svc wifi disable` deadlocked the whole Wi-Fi control
+# plane (step 2c-4 has the disassembly).  It is a CODEGEN property, so no amount
+# of source review or symbol checking can catch a regression -- only reading the
+# emitted instructions can.  The failure mode is also perfectly silent
+# otherwise: the module loads, associates, passes traffic, and only wedges when
+# something drains the ESS link.
+#
+# audit_scan_loop.py requires a conditional back-edge to the loop head AND a
+# 64-bit LDR reload of head->prNext inside the body, and exits non-zero when
+# either is missing.  agui's reference build passes; our pre-fix artifacts fail.
+echo "=== scan drain-loop codegen gate (infinitely looping list drain) ==="
+if python3 "$PORT/audit_scan_loop.py" "$OUTDIR/wlan_drv_gen4m.ko"; then
+  echo "   OK: drain loop has a conditional back-edge and reloads head->prNext."
+  echo "       -> scanGetCurrentEssChnlList() can no longer spin forever."
+else
+  echo "ERROR: scanGetCurrentEssChnlList()'s drain loop compiles to an infinite"
+  echo "       loop in the SHIPPED wlan_drv_gen4m.ko (unconditional back-edge"
+  echo "       and/or no head->prNext reload). Flashing this would wedge the"
+  echo "       Wi-Fi control plane on the first scan/ESS drain."
+  echo "       Re-check step 2c-4 (drain barrier) and step 2d-2"
+  echo "       (-mpc-relative-literal-loads)."
+  exit 1
+fi
 
 # Hard gate for the ONLY thing that makes those modules loadable: the target
 # kernel must carry the ADRP relocation fix from step 2e. Shipping .ko files that
