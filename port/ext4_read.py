@@ -17,7 +17,11 @@ import sys, struct
 
 class Ext4:
     def __init__(self, path):
-        self.f = open(path, 'rb')
+        # `path` may be a filename or any seekable/readable object.  The latter
+        # lets sparse-image wrappers (see sparse.py) be read without first
+        # expanding a 1.4 GB system image to disk.
+        self.path = path
+        self.f = path if hasattr(path, 'read') else open(path, 'rb')
         self.f.seek(1024)
         sb = self.f.read(1024)
         if sb[0x38:0x3a] != b'\x53\xef':

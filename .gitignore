@@ -27,3 +27,17 @@ __pycache__/
 
 # 下载的 CI artifact 与临时产物（体积大，不入库）
 _ci/
+
+# 交付整合包里的固件镜像（1.9 GB+，版权/分发受限，可由脚本重新生成）
+# 注意：包内的 flash_wifi64.sh / README.md / MANIFEST.sha256 是文本，仍然入库
+WiFi版64位整合包/img/
+WiFi版64位整合包/stock/
+
+# 整合包压缩件与设备端构建暂存目录（体积大，不入库）
+WiFi版64位整合包.zip
+wifi64_pkg/
+
+# 第三方参考包（agui 的 4G 整理包、极简 arm64 GSI 重打包件）
+4g小爱64位系统整合包/
+极简arm64gsi可不扩容刷入.zip
+

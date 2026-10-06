@@ -1905,6 +1905,153 @@ if (!IS_BSS_INDEX_AIS(prGlueInfo->prAdapter, ucBssIndex))   /* :1812  (_BssIndex
 以及该 netdev 的 `ucBssIdx` 为何 ≥2；再决定是修正接口↔BSS 映射，还是让 `mtk_cfg80211_sched_scan_start`
 接受非 AIS 接口（厂商实现可能本就不支持在那些接口上 PNO）。
 
+## 9.21 vendor 分区 64 位适配 + 整合包（2026-10-06）✅
+
+目标：让 **Archytas（Wi-Fi 版）** 从「64 位内核 + 32 位原厂 ROM」升级为**完整 64 位
+Android**（arm64 GSI）。参考 agui 的 4G 整合包，但**基座换成 Wi-Fi 原厂 vendor**
+并做三处关键改进。
+
+### 9.21.1 基座：为什么用救砖包里的 vendor，而不是手里的 Wi-Fi 原包
+
+| 来源 | 指纹 | 结论 |
+| --- | --- | --- |
+| `柴提全原无数据WiFi.9.1638/.../vendor.bin` | `Archytas:9/.../1638` | 比设备**旧** |
+| `柴提全原无数据4G_9.1864/4G原包/vendor.bin` | `Archimedes:9/.../1864` | 4G 版 |
+| `mtkclient-archytas-一键救砖包.zip → img/vendor.img` | `Archytas:9/.../**1754**`，`date.utc=1610044705` | ✅ **与设备 `getprop` 完全一致** |
+
+设备当前 `ro.vendor.build.fingerprint = Xiaomi/full_Archytas/Archytas:9/PPR1.180610.011/1754`。
+用 1754 救砖镜像做基座，避免把 4G 的 SIM/蜂窝/按键配置带进来。
+
+> **纠正一个误判**：agui vendor 里有 88 个文件与我们的 4G 原包「大小不同」，
+> 但比对 `build.prop` 后确认**只是 ROM 版本差异** —— 他的基座是
+> `Archimedes:9/.../462:userdebug`（2019-04-26 构建），不是我们的 1864。
+> 真正刻意的改动只有 53 项**新增**。
+
+### 9.21.2 三处改动（`port/device_make_vendor64.sh` + `port/build_wifi64_vendor.py`）
+
+**① 注入 `/lib64/`（29 个 aarch64 库，11,640,469 B）**
+
+64 位 SurfaceFlinger / 应用需要**同位数（进程内 dlopen）**的 vendor 库。原厂
+vendor **完全没有 `/vendor/lib64`**（全 32 位 ELF），这才是 arm64 GSI 跑不起来的根因。
+
+- GPU/PowerVR：`libusc` `libsrv_um` `libglslcompiler` `libIMGegl` `libgpu_aux` `libged` `libladder` `libbwc` `libtqvalidate`
+- EGL/GLES：`egl/libEGL_mtk` `libGLESv1_CM_mtk` `libGLESv2_mtk` `egl.cfg`
+- 显示/合成：`hw/gralloc.mt6761` `hw/hwcomposer.mt6761` `hw/memtrack.mt6761` `hw/gralloc.default` `hw/android.hardware.graphics.mapper@2.0-impl`
+- 内存/ION：`libion_mtk` `libion_ulit` `libgralloc_extra` `libdrm` `libudf`
+- 画质 PQ：`libdpframework` `libpq_prot` `libpq_cust_base` `vendor.mediatek.hardware.pq@2.0/2.1/2.2`
+
+来源＝agui 的 4G vendor（同 SoC/同 MT6761/同 vendor 树），**逐个校验 `ELF64 + EM_AARCH64`** 后搬运。
+
+**② 替换 `/lib/modules/*.ko` 为本仓库的 arm64 模块**
+
+`wmt_drv` / `wmt_chrdev_wifi` / `wlan_drv_gen4m` / `bt_drv`，取自 CI run `37412241394`
+（含 §9.19 的 drain 死循环修复 + §9.20 的 workaround 摘除）。
+原厂是同名 **ELF32 ARMv7** 模块，64 位内核 `insmod` 必失败。
+
+**③ `/default.prop`：`ro.zygote=zygote32` → `zygote64_32`**
+
+**不是可选项。** 实测两份 GSI（agui 的 2.00 GiB 与极简 1.396 GiB）的
+`/system/etc/prop.default` 与 `/system/build.prop` **都没有定义 `ro.zygote`**；
+设备上该属性唯一来源就是 `/vendor/default.prop`，而 `ro.` 属性只写一次。
+不改则 arm64 GSI 只会拉起 32 位 zygote。
+
+### 9.21.3 已核实「不需要改」的项（避免过度改动）
+
+| 项 | 结论与依据 |
+| --- | --- |
+| **SELinux 策略** | **不用改。** 原厂 `vendor_file_contexts`/`plat_file_contexts` 已为全部 29 个库写好 `same_process_hal_file` 规则（`/vendor/lib(64)?/libusc\.so`、`hw/gralloc\.mt[0-9]+\.so`、`egl(/.*)?` …），说明原厂本就为 64 位图形栈预留标签。适配时按**同名 32 位文件 `chcon` 复制上下文**即可（已验证结果：`same_process_hal_file` / `vendor_file` / `vendor_hal_file` 与原 32 位一致） |
+| **`/etc/init/*.rc`** | **不用改。** agui 的 `init.wlan_drv.rc` 差异只是末尾多了个 **`disabled`** 的自用 bootguard 服务（`start` 还是注释掉的），与位数无关 |
+| **`ro.product.cpu.abilist`** | **不用管。** vendor 只设 `ro.vendor.product.cpu.*`；面向应用的 `ro.product.cpu.abilist` 由 GSI 提供（`arm64-v8a,armeabi-v7a,armeabi`），二者不冲突 |
+| **VNDK** | **天然匹配。** vendor `ro.vndk.version=28`；两份候选 GSI 都恰好携带 `vndk-28`(180)+`vndk-sp-28`(33)。**换 Android 10 的 GSI 反而会因为缺 vndk-28 而挂** |
+| **lk / preloader** | **不动。** 原厂 lk + 本包 boot 已实测可启动 |
+
+### 9.21.4 system（GSI）选型：极简包 vs agui 包
+
+| | agui `system-arm64-ab-vanilla-nosu.img` | `极简arm64gsi可不扩容刷入.zip` |
+| --- | --- | --- |
+| 构建 | `treble_arm64_bvN 9 PQ3B.190801.002`（phh） | **同一构建** |
+| ext4 声明尺寸 | **2.00 GiB** | **1.396 GiB**（366000 × 4096） |
+| 能否放进 system 分区（1,503,232,000 B） | ❌ 需扩容分区 | ✅ **余 4,096,000 B** |
+| vndk | vndk-28 / vndk-sp-28 | 同 |
+
+→ **选极简包**。agui 包里那份必须走 `expand_system_*` 扩容，风险高且多余。
+
+### 9.21.5 构建方式：为什么在**设备上**做
+
+Windows 主机**没有**可用的 ext4 写工具（无 WSL、无 e2fsprogs），而设备自带完整
+e2fsprogs（`mke2fs`/`e2fsck`/`tune2fs`/`resize2fs`）+ `losetup`。于是：
+
+```
+cp 一份原厂镜像 -> losetup /dev/block/loop0 -> mount -t ext4 -o rw
+  -> 注入 lib64 / 换模块 / 改 default.prop / chcon
+  -> umount -> e2fsck -fy
+```
+
+**不动线上 `/vendor`**（已核实产出后线上仍无 `/vendor/lib64`），产出的是干净可 flash 的镜像。
+本地校验（`port/build_wifi64_vendor.py`）11 项全过：文件数、模块 sha256、
+`ro.zygote`、`ro.vndk.version`、基座版本号、注入库全部 ELF64。
+
+**踩坑**：`getenforce` 在 Android 上返回的是 `Enforcing`/`Permissive` **文本**（不是 `1`/`0`），
+首版脚本拿它和 `"1"` 比较导致**改完标签后没把 SELinux 恢复回 Enforcing**（设备一度停在
+Permissive）。已改用 `case` 匹配并立即 `setenforce 1` 复原。
+
+### 9.21.6 真机内核回读验证（只读，不动分区）
+
+把**最终** `vendor.img` 推到设备 → `losetup` + `mount -ro` 用**真实内核**读回：
+
+| 检查 | 结果 |
+| --- | --- |
+| `/vendor/lib64` 内容 | 29 个文件，`ls -Z` 标签正确 |
+| `default.prop` | `ro.zygote=zygote64_32` ✅ |
+| 4 个模块 md5 vs 主机 arm64 构建 | **逐字节相同** ✅ |
+| 抽样 `.so` ELF 头 | `7f454c4602`（ELF64）✅ |
+| `e2fsck -fy` | `982/101632 files, 44272/101575 blocks`，干净 |
+
+### 9.21.7 交付物
+
+`WiFi版64位整合包/`（1.9 GB，另出同名 zip）：
+
+```
+img/boot.img      64 位内核 4.9.117 + Wi-Fi DTB（consys 修复）  sha256 18d8a3c5…
+img/vendor.img    ★ 64 位适配版 vendor（1754 + lib64 + arm64 模块） sha256 41a60cb0…
+img/system.img    phh treble_arm64_bvN 9，raw 1,499,136,000 B    sha256 552ced84…
+stock/dtbo.img    原厂 overlay 1754（Wi-Fi，无 SIM GPIO）
+stock/lk.bin lk2.bin vbmeta.img boot-stock-1754.img MT6761_Android_scatter.txt
+flash_wifi64.sh   一键刷机（备份→写 4 分区→关 AVB→清 userdata+metadata→重启）
+README.md         完整说明（含与 agui 4G 包的逐项对比）
+MANIFEST.sha256
+```
+
+**输入文件（在仓库外，需自备，不入版本控制）**：
+
+| 路径 | 说明 | 获取方式 |
+| --- | --- | --- |
+| `D:/Downloads/_archytas_rom/vendor_rescue.img` | 1754 原厂 vendor 基座（400 MiB） | 解压 `D:/Downloads/mtkclient-archytas-一键救砖包.zip` 取 `img/vendor.img` 重命名 |
+| `D:/Downloads/极简arm64gsi可不扩容刷入.zip` | system（arm64 GSI 9，raw 1,499,136,000 B） | 第三方重打包件 |
+| `D:/Downloads/4g小爱64位系统整合包/` | `vendor/lib64` 的 29 个 aarch64 库来源 | agui 交付的 4G 整理包 |
+| `_ci/vendor_audit/agui_lib64/`、`_ci/37412241394/` | 上两项抽取到本地的暂存（`_ci/` 已忽略） | 见 §9.21.9 脚本 |
+
+`build_wifi64_vendor.py` 的基座默认值即 `os.path.dirname(ROOT)/_archytas_rom/vendor_rescue.img`，
+`--base/--lib64/--ko/--out` 均可覆盖。
+
+### 9.21.8 尚未完成的一步：**arm64 GSI 实机启动未验证**
+
+- 已证明：vendor 镜像**结构正确、可挂载、内容正确**；boot/system 与分区尺寸匹配。
+- **未证明**：刷入 arm64 GSI 后真机能进系统。
+- 原因：换 system 属于 system-as-root 的根分区，**无法在运行时 dd**；必须走
+  **BROM（下载模式）**，而进下载模式需要**人工按键**（关机 → 音量下 + 插 USB）。
+- 另需注意：**换 system 必须清 `userdata` + `metadata`**（原 data 属 Android 10/32 位，
+  新 system 是 Android 9/arm64），设备 `/data` 现有 185 个应用数据目录与 Wi-Fi 配置。
+
+### 9.21.9 新增工具
+
+- `port/ext4_inventory.py` —— 整树清点 + 双镜像 diff（旧 `tree`/`find` 每级从根重走，O(n²) 不可用）
+- `port/ext4_extract.py` —— 从镜像里递归提取子树（保留权限/软链）
+- `port/sparse.py` —— Android sparse 镜像只读适配器（可直接喂给 `ext4_read.Ext4`）+ `expand` 子命令
+- `port/device_make_vendor64.sh` —— 设备端 vendor 改造脚本
+- `port/build_wifi64_vendor.py` —— 主机驱动：推送 → 设备端构建 → 拉取 → 11 项校验
+- `ext4_read.py` 增补：`Ext4()` 现在也接受**类文件对象**（配合 sparse 适配器）
+
 ---
 
-*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）、`build_connectivity_modules.sh`（2026-10-04 重写）、`verify_build_script.py`（Gate #1-6）、`install_wifi_modules.sh`（vendor 分区自动加载）、`extract_modules.py`（裸 ext4 提 .ko，2026-10-06 增）、`audit_wmt_fb_workaround.py` + `disasm_arm64.py`（workaround 生效审计，2026-10-06 增）、`audit_scan_loop.py`（drain 循环出口门禁，2026-10-06 增）、`disasm_capstone.py`（Capstone 权威反汇编，2026-10-06 增）、`diff_func_insns.py`（两个构建的同函数逐指令 diff）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*
+*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）、`build_connectivity_modules.sh`（2026-10-04 重写）、`verify_build_script.py`（Gate #1-6）、`install_wifi_modules.sh`（vendor 分区自动加载）、`extract_modules.py`（裸 ext4 提 .ko，2026-10-06 增）、`audit_wmt_fb_workaround.py` + `disasm_arm64.py`（workaround 生效审计，2026-10-06 增）、`audit_scan_loop.py`（drain 循环出口门禁，2026-10-06 增）、`disasm_capstone.py`（Capstone 权威反汇编，2026-10-06 增）、`diff_func_insns.py`（两个构建的同函数逐指令 diff）、`ext4_inventory.py` / `ext4_extract.py` / `sparse.py` / `device_make_vendor64.sh` / `build_wifi64_vendor.py`（vendor 64 位适配链，2026-10-06 增）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`；Archytas 全量原厂镜像（救砖包 `img/`）。*
