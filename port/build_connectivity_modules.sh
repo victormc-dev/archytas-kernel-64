@@ -317,6 +317,30 @@ else
   echo "WARN: -Wno-error anchor not found in wlan Makefile; EMI shims NOT injected"
 fi
 
+# ---- 2c-2 / 2c-3. Suspend + POWERDOWN workarounds -- OPT-IN, DEFAULT OFF -----
+# HISTORY: both patches were added on 2026-10-05 to stop main_thread dying with
+# `kalIoctlByBssIdx: wait main_thread timeout, duration:30720ms`.  They are no
+# longer needed, and they actively hurt:
+#
+#   * step 2c-4 / doc 9.19 show that those 30.72 s timeouts were a SYMPTOM of
+#     the scan drain loop being miscompiled into an infinite loop.  main_thread
+#     hung inside the drain, so every command that waits on main_thread timed
+#     out -- including the suspend path.  Fixing the loop removed the cause.
+#   * agui's reference build carries ZERO workarounds and works.
+#   * 2c-2 makes priv_driver_set_suspend_mode() `return 0;` immediately, so the
+#     `SETSUSPENDMODE 1` that wpa_supplicant sends right after Wi-Fi comes up
+#     becomes a complete no-op.  Observed live on the device 2026-10-06: after
+#     any disable/enable cycle wificond then reports
+#         wificond: NL80211_CMD_START_SCHED_SCAN failed: Invalid argument
+#         wificond: Failed to start pno scan
+#     and the station never re-associates -- i.e. Wi-Fi toggling is broken.
+#
+# Default is therefore OFF: the module is built from the unpatched suspend and
+# POWERDOWN paths, exactly like the reference build.  Set
+# ARCHYTAS_SUSPEND_WORKAROUND=1 to reinstate 2c-2 + 2c-3 for A/B testing.
+if [ "${ARCHYTAS_SUSPEND_WORKAROUND:-0}" = "1" ]; then
+echo "   ARCHYTAS_SUSPEND_WORKAROUND=1 -> applying steps 2c-2 and 2c-3"
+
 # ---- 2c-2. Patch out the suspend-mode main_thread deadlock -------------------
 # WHY: wpa_supplicant sends SETSUSPENDMODE 1 at init.  priv_driver_set_suspend_mode
 # forwards it to main_thread → wlanSetSuspendMode → send FW suspend command →
@@ -372,6 +396,12 @@ PYEOF
   echo "   patched wmt_fb_notifier_callback: skip POWERDOWN work"
 else
   echo "WARN: wmt_dev.c POWERDOWN anchor not found; early POWERDOWN NOT patched"
+fi
+
+else
+  echo "   suspend/POWERDOWN workarounds DISABLED (default): building the real"
+  echo "   wlanSetSuspendMode path and the real screen-off POWERDOWN work --"
+  echo "   matches agui's zero-workaround reference build."
 fi
 
 # ---- 2c-4. Make scanGetCurrentEssChnlList()'s list drain un-miscompilable ----
