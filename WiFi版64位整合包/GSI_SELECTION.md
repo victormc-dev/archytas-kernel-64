@@ -37,18 +37,31 @@ phh 系命名：**`system-<arch>-<ab><variant><SU>[-vndklite].img`**
 system-arm64-ab-vanilla-nosu.img        # ≈ 当前正在运行的构建
 ```
 
-**要 Android 10 / 11 / 12：必须用 `-vndklite`**
+**要 Android 10 / 11 / 12：普通版就行（有实测证据）**
 
 ```
-system-arm64-ab-vndklite-vanilla.img
+system-arm64-ab-vanilla-nosu.img        # Android 10 的普通版，无需 vndklite
 ```
 
-原因：`ro.vndk.version=28` 是 **vendor 侧固定值**，linker 只会去找
-`/system/etc/ld.config.28.txt`。Android 10+ 的普通 GSI 只带 `ld.config.29/30.txt`，
-不匹配；`vndklite` 变体专门用于「**vendor 比 system 老**」这一场景。
+拆开 `lineage-17.1-...-bvS.img`（Android 10，**非 vndklite**）实测：
 
-> 顺带给上次的悬案一个解释：`lineage-17.1-20210808-UNOFFICIAL-treble_arm64_avS.img`
-> 是 **Android 10 + 非 vndklite**，VNDK 29 对 28 不匹配 —— 很可能就是它起不来的原因之一。
+| 事实 | 值 |
+|---|---|
+| `/system/etc/ld.config.*.txt` | **26 / 27 / 28 / 29 四份齐全** |
+| `/system/lib{64}/vndk-{26,27,28,29}` | 自带全部 4 份 |
+| `/system/lib{64}/vndk-sp-{26,27,28,29}` | 自带全部 4 份 |
+
+⇒ 普通 GSI 本身就是按「兼容任意 vendor」设计的：linker 按设备的
+`ro.vndk.version=28` 选中 **`ld.config.28.txt`**，用 GSI 自带的 `vndk-28` 跑。
+**老 vendor + 新 system 不需要 vndklite。**
+
+`vndklite` 真正适用的场景（本机都不满足）：
+
+- 设备 `ro.vndk.lite=true`（VNDK-lite 设备）—— 本机该项**为空**；
+- vendor 比 system 更新的场合。
+
+> 上一版文档曾推测「上次 `avS` 起不来是 VNDK 29 对 28 不匹配」，**这个推测已被上面的
+> 实测排除**：GSI 自带 vndk-28 与 `ld.config.28.txt`。其真正的失败原因待另行定位。
 
 ### 硬约束
 
