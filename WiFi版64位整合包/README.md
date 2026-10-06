@@ -140,7 +140,7 @@ CI 最新构建（run `37412241394`），含两项修复：
 | 检查 | 实测结果 | 影响 |
 |---|---|---|
 | bootloader 解锁 | `ro.boot.flash.locked=0`、`verifiedbootstate=orange` | 可以刷 |
-| **dm-verity** | **未启用**：`/vendor` 由 `/dev/block/mmcblk0p30` **直挂 ext4**，不是 `/dev/block/dm-X`；`ro.boot.veritymode` 为空 | **vbmeta 不用动**。动它反而有把校验重新打开的风险 |
+| **dm-verity** | **未启用**：`/vendor` 由 `/dev/block/mmcblk0p30` **直挂 ext4**，不是 `/dev/block/dm-X`；`ro.boot.veritymode` 为空 | **原机状态**下 vbmeta 整块全零、AVB 未启用，**不用动**。**但经 mtkclient 救砖或改过分区表之后，vbmeta 内容不可信**，必须显式关一次（见下） |
 | **dtbo** | 设备上 dtbo 的前 8,388,579 字节与本包 `stock/dtbo.img` **逐字节相同**（多出的 29 字节全是 `00` 填充） | **不用刷**。默认跳过，`FLASH_DTBO=1` 可强制 |
 | userdata / cache | vendor fstab 里带 **`formattable`** 标志 | `fastboot erase` 后系统会自动重建文件系统，不必手动 `mke2fs` |
 | 原机 /data | `ro.crypto.state=unencrypted`（**未加密**） | 双清没有 FBE 密钥残留问题 |
@@ -155,7 +155,7 @@ FASTBOOT=/path/to/fastboot.exe bash flash_wifi64_fastboot.sh
 ```
 
 脚本会：`adb reboot bootloader` → 等 fastboot → 刷 **boot / vendor / system**
-（**跳过 dtbo 与 vbmeta**）→ **erase userdata + metadata + cache** → 重启。
+（**跳过 dtbo**；vbmeta 视设备状态而定，见下）→ **erase userdata + metadata + cache** → 重启。
 
 ```bash
 # 等价手动：
@@ -168,6 +168,22 @@ fastboot erase metadata                     # 换 system 必须清
 fastboot erase cache
 fastboot reboot
 ```
+
+> **关于 vbmeta（两种情形不要搞混）**
+>
+> - 设备**从未被折腾过**（vbmeta 仍是出厂全零、`ro.boot.veritymode` 为空）：**不要刷**，
+>   刷了反而可能把校验打开。
+> - 设备**刚走过 mtkclient 救砖 / 改过分区表**：vbmeta 分区里是什么无从得知
+>   （fastboot 读不出来，本机 lk 又不支持 `fetch`），此时**必须显式关一次**，否则
+>   换 64 位内核后若残留在里面的原厂 AVB descriptor 仍在生效，`boot` 哈希对不上会被拦：
+>
+> ```bash
+> fastboot --disable-verity --disable-verification flash vbmeta stock/vbmeta.img
+> ```
+>
+> 这条会把 `stock/vbmeta.img`（原厂空 AVB，2,984 B）就地改写 flags 后写入，等价于
+> `mtk da vbmeta 3`。**已实测**：该状态下刷 boot/vendor/system + 此条 + 双清，
+> 首启 30 秒进桌面，`ro.boot.veritymode` 保持为空。
 
 > 想改回按键进 fastboot：关机 → 按住 **音量下 + 电源**。
 
@@ -197,7 +213,9 @@ mtk reset
 ```
 
 > 走 BROM 时才需要 `mtk da vbmeta 3`：raw 写入绕过了 fastboot 的 AVB 处理，
-> 所以显式关一次更稳。走 fastboot 则**不要**刷 vbmeta（本机 verity 本来就没开）。
+> 所以显式关一次更稳。走 fastboot 时若设备**从未被折腾过**则**不要**刷 vbmeta
+> （原机 verity 本来就没开）；若刚**救过砖 / 改过分区表**，则按方式 A 的说明
+> 用 `--disable-verity --disable-verification` 显式关一次。
 
 > **换 system 必须清数据**：原机 data 属于 Android 10（32 位），新 system 是
 > Android 9 arm64，不清会卡在开机动画/加密失败。
@@ -377,6 +395,25 @@ adb shell dmesg | grep -i "Find .* in .* BSSes"   # 扫描路径跑通（旧版�
 刷机路径：`adb reboot bootloader` → `fastboot flash boot / vendor / system`
 → `fastboot erase userdata metadata cache` → `fastboot reboot`。
 **未刷 dtbo、未动 vbmeta。** 首启约 30 秒进桌面。
+
+> **二次验证（同日稍晚，设备经历 mtkclient 救砖之后）**：GPT 已被救砖流程还原
+> （`getvar` 报 `system: 0x59998000` / `userdata: 0x2f39fbe00`，与出厂值逐位一致），
+> 但 vbmeta 内容不可信，于是改为全量重刷并**显式关一次校验**：
+>
+> ```
+> fastboot flash boot   img/boot.img            # 32768 KB，2.3 s
+> fastboot flash vendor img/vendor.img          # 自动分 sparse 2 块，17.8 s
+> fastboot flash system img/system.img          # 自动分 sparse 11 块，105 s
+> fastboot --disable-verity --disable-verification flash vbmeta stock/vbmeta.img
+> fastboot erase userdata metadata cache
+> fastboot reboot
+> ```
+>
+> 结果与首刷**完全一致**：adb 24 s 上线、30 s 进桌面，`arm64-v8a` / `zygote64_32` /
+> `/vendor/lib64` 29 个文件 / `avc denied` 仅剩已知的 `nvram_agent_binder`，
+> `wlan0` UP、`wpa_supplicant` + Wi-Fi HAL running、内核 `aisFsmSteps`/`halSetFWOwn` 日志活跃。
+> 三次写入的**中文路径**（`WiFi版64位整合包/img/*.img`）fastboot 37.0.1 处理正常。
+> 分区容量在刷后复核仍是出厂值（`system` 1,503,232,000 / `userdata` 12,678,315,520）。
 
 | 检查项 | 结果 |
 |---|---|

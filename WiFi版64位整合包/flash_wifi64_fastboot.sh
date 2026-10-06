@@ -77,7 +77,7 @@ printf "  %-8s -> %s\n" boot   "$IMGDIR/boot.img     (64 位内核 4.9.117 + Wi-
 printf "  %-8s -> %s\n" vendor "$IMGDIR/vendor.img   (原厂 1754 + /lib64 图形栈 + arm64 连通性模块)"
 printf "  %-8s -> %s\n" system "$IMGDIR/system.img   (arm64 GSI，1,499,136,000 B)"
 [[ "$FLASH_DTBO"   == "1" ]] && printf "  %-8s -> %s\n" dtbo   "$STOCKDIR/dtbo.img  (设备上已与之一致，强制刷)"
-[[ "$FLASH_VBMETA" == "1" ]] && printf "  %-8s -> %s\n" vbmeta "$STOCKDIR/vbmeta.img (强制刷：有重新打开校验的风险!)"
+[[ "$FLASH_VBMETA" == "1" ]] && printf "  %-8s -> %s\n" vbmeta "$STOCKDIR/vbmeta.img  (强制刷：就地把 disable-verity/verification 位置 1)"
 echo ""
 echo "  不动：vbmeta / dtbo / lk / lk2 / preloader / recovery / nvram / nvdata / protect* / md1img"
 if [[ "$NO_WIPE" == "1" ]]; then
@@ -132,7 +132,7 @@ echo "==> 刷 system（1.4 GiB，最慢的一步；>max-download-size 时 fastbo
 run "$FB" flash system "$IMGDIR/system.img" || { echo "X system 失败"; exit 1; }
 
 if [[ "$FLASH_VBMETA" == "1" ]]; then
-  echo "==> 刷 vbmeta（强制）..."
+  echo "==> 刷 vbmeta（强制，关 verity + verification）..."
   run "$FB" --disable-verity --disable-verification flash vbmeta "$STOCKDIR/vbmeta.img"
 fi
 

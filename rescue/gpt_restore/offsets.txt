@@ -1,0 +1,6 @@
+# 用法： mtk wo <offset> <length> <file>
+# 主表：保护性 MBR + 主 GPT 头 + 项数组  -> 磁盘 LBA 0..33
+0 17408 gpt_primary.bin
+# 备份表：项数组(32 扇区) + 备份 GPT 头(1 扇区)  -> 磁盘 LBA (DSZ-33)..(DSZ-1)
+15634251264 16896 gpt_backup.bin
+# DSZ=30535680 sector_size=512
