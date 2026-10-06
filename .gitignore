@@ -35,9 +35,17 @@ WiFi版64位整合包/stock/
 
 # 整合包压缩件与设备端构建暂存目录（体积大，不入库）
 WiFi版64位整合包.zip
+WiFi版64位整合包.zip.sha256
+pkg_tmp.zip
 wifi64_pkg/
 
 # 第三方参考包（agui 的 4G 整理包、极简 arm64 GSI 重打包件）
 4g小爱64位系统整合包/
 极简arm64gsi可不扩容刷入.zip
+
+# 刷机现场的工作数据（体积大、可复现，不入库）
+_rollback/        # 刷机前的设备镜像与 /data 备份
+_diag/            # 排查过程中的 dump / 提取副本
+_fix/             # 修复 lib64 的中间产物
+_tools/           # 下载来的 platform-tools
 

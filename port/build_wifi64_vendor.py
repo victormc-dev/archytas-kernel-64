@@ -146,6 +146,7 @@ def main():
     print("\n== 本地校验 ==")
     sys.path.insert(0, HERE)
     from ext4_read import Ext4                      # noqa: E402
+    import elf_integrity                            # noqa: E402
     fs = Ext4(a.out)
     ok = True
 
@@ -180,18 +181,27 @@ def main():
     btxt = fs._read_any(bp, inode).decode("utf-8", "replace")
     check("1754" in btxt, "基座是 build 1754（与设备一致）")
 
-    # every injected lib must be aarch64
-    bad = []
-    for sub, names in (("", lib64), ("/hw", None), ("/egl", None)):
-        if names is None:
-            _, i2 = fs.resolve("/lib64" + sub)
-            names = [n for n, d, t in fs.list_dir(i2) if t == 1]
-        for n in names:
+    # Every injected lib must be aarch64 AND structurally complete.  The
+    # completeness half is not optional: a truncated .so still carries a valid
+    # 20-byte ELF header, so an "is it ELF64?" test alone passes while the
+    # library is unusable.  That is how 19 of these 29 libs once shipped short
+    # by up to 63 KB and crash-looped SurfaceFlinger -- see elf_integrity.py.
+    not64, truncated = [], []
+    for sub in ("", "/hw", "/egl"):
+        _, i2 = fs.resolve("/lib64" + sub)
+        for n in [n for n, d, t in fs.list_dir(i2) if t == 1]:
             inode, i3 = fs.resolve("/lib64%s/%s" % (sub, n))
-            data = fs._read_any(i3, inode)[:20]
-            if data[:4] == b"\x7fELF" and data[4] != 2:
-                bad.append(sub + "/" + n)
-    check(not bad, "所有注入的 .so 都是 ELF64（异常: %s）" % (bad or "无"))
+            data = fs._read_any(i3, inode)
+            if data[:4] != b"\x7fELF":
+                continue        # egl.cfg and friends are text configs
+            if data[4] != 2:
+                not64.append(sub + "/" + n)
+            good, why = elf_integrity.check(data)
+            if not good:
+                truncated.append("%s/%s [%s]" % (sub, n, why))
+    check(not not64, "所有注入的 .so 都是 ELF64（异常: %s）" % (not64 or "无"))
+    check(not truncated,
+          "所有注入的 .so 结构完整、无截断（异常: %s）" % (truncated or "无"))
 
     print("\n== %s ==" % ("全部校验通过" if ok else "存在失败项"))
     return 0 if ok else 1

@@ -3,8 +3,10 @@
 """
 Minimal read-only ext4 reader for raw partition images (no external deps).
 
-Supports: 32/64-bit block group descriptors, extent trees (depth 0/1),
-linear directory entries, and inline data for tiny files. Good enough to
+Supports: 32/64-bit block group descriptors, extent trees (any depth), linear
+directory entries, inline data for tiny files, fast symlinks, and **sparse
+files** -- holes and uninitialized extents read back as zeros, and each extent
+is placed at its own logical block number (`ee_block`). Good enough to
 inventory /vendor/lib* and read small XML/rc files from a vendor.bin dump.
 
 Usage:
@@ -82,56 +84,93 @@ class Ext4:
                 'is_lnk': (mode & 0xF000) == 0xA000,
                 'is_reg': (mode & 0xF000) == 0x8000}
 
-    def _extent_blocks(self, i_block, depth):
-        """Yield (start_block, block_count) leaves of the extent tree."""
-        magic, entries, _max, d = struct.unpack_from('<HHHH', i_block, 0)
+    def _extent_blocks(self, block):
+        """Yield (logical_block, start_block, count, initialized) extent leaves.
+
+        `ee_block` -- the LOGICAL block number -- must be carried through.  An
+        ext4 file may be sparse: extents need not be adjacent, and any gap is a
+        hole that reads as zeros.  Dropping ee_block and concatenating extents
+        in physical order silently corrupts every file whose extents are not
+        contiguous -- e.g. Android's 64 KiB-page-aligned ELF .so files, which
+        normally carry a large zero hole between their two PT_LOAD segments.
+
+        Earlier versions of this reader did exactly that, which truncated
+        19 of the 29 /vendor/lib64 libraries by up to 63 KB each.
+        """
+        magic, entries, _max, depth = struct.unpack_from('<HHHH', block, 0)
         if magic != 0xF30A:
             # old-style block pointers (pre-extent). Rare on ext4; bail.
             raise SystemExit("non-extent inode not supported")
-        data = i_block[12:]
+        data = block[12:]                      # 12-byte extent header
         for i in range(entries):
             rec = data[i*12:(i+1)*12]
+            if len(rec) < 12:
+                break                          # corrupt/over-long extent count
             if depth == 0:
                 ee_block, ee_len, ee_hi, ee_lo = struct.unpack('<IHHI', rec)
                 start = ee_lo | (ee_hi << 32)
-                length = ee_len & 0x7FFF
-                yield (start, length)
+                # Per the kernel: ee_len <= 32768 means that many *initialized*
+                # blocks.  ee_len > 32768 marks an *uninitialized* extent whose
+                # length is ee_len - 32768 and whose contents read as zeros.
+                if ee_len <= 32768:
+                    length, initialized = ee_len, True
+                else:
+                    length, initialized = ee_len - 32768, False
+                if length:
+                    yield (ee_block, start, length, initialized)
             else:
                 ei_block, ei_leaf_lo, ei_leaf_hi, _ = struct.unpack('<IIHI', rec)
                 leaf = ei_leaf_lo | (ei_leaf_hi << 32)
-                sub = self.read_block(leaf)
-                yield from self._extent_blocks(sub, depth - 1)
+                yield from self._extent_blocks(self.read_block(leaf))
 
     def file_blocks(self, ino):
-        """Return ordered list of data block numbers for inode (extent leaves)."""
-        inode = self.read_inode(ino)
-        # inline data?
-        if inode['is_reg'] and (inode['flags'] & 0x10000000) and inode['size'] > 0:
-            # data stored in i_block after 4-byte magic header
-            return [('inline', inode['i_block'])]
-        blocks = []
-        d0 = struct.unpack_from('<HHHH', inode['i_block'], 0)[3]  # eh_depth
-        # re-read depth from header properly
-        magic, entries, _max, depth = struct.unpack_from('<HHHH', inode['i_block'], 0)
-        for (start, length) in self._extent_blocks(inode['i_block'], depth):
-            blocks.extend(range(start, start + length))
-        return blocks
-
-    def read_file(self, ino):
+        """Return [(logical_block, physical_block, count)] of allocated data."""
         inode = self.read_inode(ino)
         if inode['size'] == 0:
+            return []
+        if inode['is_reg'] and (inode['flags'] & 0x10000000):
+            return [('inline', inode['i_block'])]
+        return [(l, s, n) for (l, s, n, init) in
+                self._extent_blocks(inode['i_block']) if init]
+
+    def read_file(self, ino):
+        return self.read_inode_data(self.read_inode(ino))
+
+    def read_inode_data(self, inode):
+        """File contents, with holes and uninitialized extents zero-filled."""
+        size = inode['size']
+        if size == 0:
             return b''
-        if isinstance(self.file_blocks(ino)[0], tuple) if (inode['is_reg'] and (inode['flags'] & 0x10000000)) else False:
-            # inline
-            raw = self.file_blocks(ino)
-            # raw is [('inline', i_block_bytes)]
-            ib = raw[0][1]
+        ib = inode['i_block']
+        if inode['is_reg'] and (inode['flags'] & 0x10000000):
+            # inline data: the bytes live in i_block itself
             if ib[:4] == b'\x00\xdf\x00\xad':
-                return ib[4:4 + inode['size']]
-            return ib[:inode['size']]
-        blocks = self.file_blocks(ino)
-        data = self.read_blocks(blocks)
-        return data[:inode['size']]
+                return ib[4:4 + size]
+            return ib[:size]
+        if inode['is_lnk'] and size <= 60:
+            # "fast" symlink: the target is stored in i_block, no extent tree
+            return ib[:size]
+
+        bs = self.block_size
+        nblocks = (size + bs - 1) // bs
+        buf = bytearray(nblocks * bs)          # holes stay zero
+        runs = []                              # coalesce adjacent extents
+        for (lblk, start, length, initialized) in self._extent_blocks(ib):
+            lblk = min(lblk, nblocks)
+            length = min(length, nblocks - lblk)
+            if not initialized or length <= 0:
+                continue
+            if runs and runs[-1][0] + runs[-1][2] == lblk \
+                    and runs[-1][1] + runs[-1][2] == start:
+                runs[-1][2] += length
+            else:
+                runs.append([lblk, start, length])
+        for lblk, start, length in runs:
+            self.f.seek(start * bs)
+            chunk = self.f.read(length * bs)
+            off = lblk * bs
+            buf[off:off + len(chunk)] = chunk
+        return bytes(buf[:size])
 
     def list_dir(self, ino):
         """Return list of (name, inode, file_type)."""
@@ -152,18 +191,10 @@ class Ext4:
         return out
 
     def _read_any(self, ino, inode):
-        if inode['size'] == 0:
-            return b''
-        if inode['is_reg'] and (inode['flags'] & 0x10000000) and inode['size'] > 0:
-            ib = inode['i_block']
-            if ib[:4] == b'\x00\xdf\x00\xad':
-                return ib[4:4 + inode['size']]
-            return ib[:inode['size']]
-        blocks = []
-        magic, entries, _max, depth = struct.unpack_from('<HHHH', inode['i_block'], 0)
-        for (start, length) in self._extent_blocks(inode['i_block'], depth):
-            blocks.extend(range(start, start + length))
-        return self.read_blocks(blocks)[:inode['size']]
+        # Kept as a method (rather than inlining read_inode_data at every call
+        # site) because ext4_extract.py, extract_modules.py and
+        # build_wifi64_vendor.py all read files through this name.
+        return self.read_inode_data(inode)
 
     def resolve(self, path):
         """Resolve absolute path to inode dict."""

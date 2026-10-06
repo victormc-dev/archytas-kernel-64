@@ -2034,14 +2034,13 @@ MANIFEST.sha256
 `build_wifi64_vendor.py` 的基座默认值即 `os.path.dirname(ROOT)/_archytas_rom/vendor_rescue.img`，
 `--base/--lib64/--ko/--out` 均可覆盖。
 
-### 9.21.8 尚未完成的一步：**arm64 GSI 实机启动未验证**
+### 9.21.8 arm64 GSI 实机启动 —— **已于同日完成，见 §9.22**
 
-- 已证明：vendor 镜像**结构正确、可挂载、内容正确**；boot/system 与分区尺寸匹配。
-- **未证明**：刷入 arm64 GSI 后真机能进系统。
-- 原因：换 system 属于 system-as-root 的根分区，**无法在运行时 dd**；必须走
-  **BROM（下载模式）**，而进下载模式需要**人工按键**（关机 → 音量下 + 插 USB）。
-- 另需注意：**换 system 必须清 `userdata` + `metadata`**（原 data 属 Android 10/32 位，
-  新 system 是 Android 9/arm64），设备 `/data` 现有 185 个应用数据目录与 Wi-Fi 配置。
+- 结论：**走 fastboot 即可，不必进 BROM**。`lk` 自带 fastboot，`adb reboot bootloader`
+  可进，`fastboot flash system` 对 system-as-root 的分区同样有效。
+- **换 system 必须清 `userdata` + `metadata`**（原 data 属 Android 10/32 位，
+  新 system 是 Android 9/arm64）。vendor fstab 里 `userdata`/`cache` 带 `formattable`，
+  擦掉后开机自动重建，不需要手动 `mke2fs`。
 
 ### 9.21.9 新增工具
 
@@ -2049,13 +2048,188 @@ MANIFEST.sha256
 - `port/ext4_extract.py` —— 从镜像里递归提取子树（保留权限/软链）
 - `port/sparse.py` —— Android sparse 镜像只读适配器（可直接喂给 `ext4_read.Ext4`）+ `expand` 子命令
 - `port/device_make_vendor64.sh` —— 设备端 vendor 改造脚本
-- `port/build_wifi64_vendor.py` —— 主机驱动：推送 → 设备端构建 → 拉取 → 11 项校验
-- `ext4_read.py` 增补：`Ext4()` 现在也接受**类文件对象**（配合 sparse 适配器）
+- `port/build_wifi64_vendor.py` —— 主机驱动：推送 → 设备端构建 → 拉取 → **12 项校验**
+- `port/elf_integrity.py` —— ELF **结构完整性**门禁（2026-10-06 增，见 §9.22）：
+  要求 `e_phoff+e_phnum*e_phentsize`、`e_shoff+e_shnum*e_shentsize`、以及每个
+  `PT_LOAD`/`PT_DYNAMIC` 的 `p_offset+p_filesz` 都不越过文件尾。只比对 ELF magic/class
+  是**不够**的——被截断的文件头依然完好。
+- `ext4_read.py` 增补：`Ext4()` 现在也接受**类文件对象**（配合 sparse 适配器）；
+  **并按 `ee_block` 定位 extent、hole 补零**（见 §9.22，这是个真实事故）
 - `port/ci_push.py` —— 顺带解决的老问题：本机 `credential.helper=helper-selector` 是**交互式**的，
   非交互 shell 里 `git push` 会**永久挂住**。该脚本复用 `ci_auth.py` 的取值逻辑，
   把 token 拼进一次性 URL 并先 `-c credential.helper=` 清空 helper 列表，
   同时对输出做脱敏（`user:token@github.com` → `github.com`），因此回调也不泄密。
+- `WiFi版64位整合包/flash_wifi64_fastboot.sh` —— fastboot 版一键刷机（跳过 dtbo/vbmeta）
 
 ---
 
-*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）、`build_connectivity_modules.sh`（2026-10-04 重写）、`verify_build_script.py`（Gate #1-6）、`install_wifi_modules.sh`（vendor 分区自动加载）、`extract_modules.py`（裸 ext4 提 .ko，2026-10-06 增）、`audit_wmt_fb_workaround.py` + `disasm_arm64.py`（workaround 生效审计，2026-10-06 增）、`audit_scan_loop.py`（drain 循环出口门禁，2026-10-06 增）、`disasm_capstone.py`（Capstone 权威反汇编，2026-10-06 增）、`diff_func_insns.py`（两个构建的同函数逐指令 diff）、`ext4_inventory.py` / `ext4_extract.py` / `sparse.py` / `device_make_vendor64.sh` / `build_wifi64_vendor.py`（vendor 64 位适配链，2026-10-06 增）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`；Archytas 全量原厂镜像（救砖包 `img/`）。*
+## 9.22 实机刷入 + 一个把 19 个 .so 截断的 ext4 读取器 bug（2026-10-06）✅
+
+### 9.22.1 走 fastboot，不动 dtbo / vbmeta（先验证再动手）
+
+刷之前把三件事查清楚，避免了两次无谓改动：
+
+| 检查 | 做法 | 结论 |
+| --- | --- | --- |
+| bootloader | `fastboot getvar unlocked` | `yes`，`ro.boot.flash.locked=0` |
+| **dm-verity 是否在跑** | `mount \| grep vendor` | `/vendor` 由 `/dev/block/mmcblk0p30` **直挂 ext4**，不是 `/dev/block/dm-X`；`ro.boot.veritymode` 为空 → **verity 未启用，vbmeta 完全不用动** |
+| dtbo 是否需要刷 | 拉下设备 dtbo 与包内比对 | 设备 dtbo 的**前 8,388,579 字节与包内逐字节相同**，多出的 29 字节全零 → **不用刷** |
+
+> 另一条捷径：**不需要 BROM**。`lk` 自带 fastboot，`adb reboot bootloader` 即可；
+> `fastboot flash system` 对 system-as-root 的分区照样有效。`max-download-size=0x8000000`
+> （128 MiB），1.4 GB 的 system 由 fastboot **自动重编码为 sparse 分块**发送
+> （11 块 / 106.9 s），400 MiB 的 vendor 分 2 块。
+> 分块后**分区内容经复核与权威副本逐字节一致**（29/29），没丢数据。
+
+### 9.22.2 症状：卡在第一屏，但 adb 通
+
+刷完首启卡在**第一屏**，但 `adb devices` 有设备——说明**内核已起**（不是内核挂住）：
+
+```
+ro.product.cpu.abi   = arm64-v8a     ✅  Zygote 位数已切换
+ro.zygote            = zygote64_32   ✅  vendor 适配三处改动全部生效
+init.svc.zygote            = restarting        ← 崩溃循环
+init.svc.surfaceflinger    = restarting        ← 崩溃循环
+```
+
+崩溃缓冲给出确切死因：
+
+```
+Abort message: 'couldn't find an OpenGL ES implementation'
+  #02 /system/lib64/libEGL.so (android::Loader::open+724)
+  #03 /system/lib64/libEGL.so (egl_init_drivers+100)
+  #05 /system/lib64/libsurfaceflinger.so (RenderEngine::create+60)
+  #06 /system/lib64/libsurfaceflinger.so (SurfaceFlinger::init+832)
+E libEGL : load_driver(/vendor/lib64/egl/libEGL_mtk.so): unknown
+```
+
+关键线索是 **`unknown`**：`dlopen()` 真的失败时 `dlerror()` 应当给出原因；
+返回 NULL 说明这是"依赖库本身有问题"，bionic 给不出错误串。
+
+### 9.22.3 根因：`ext4_read.py` 丢掉 `ee_block`，把稀疏 hole 塌陷了
+
+排除了两个显而易见的嫌疑后锁定读取器：
+
+- **不是 SELinux**：`getenforce=Enforcing`，但 `dmesg | grep avc` 里**没有一条**
+  与 libEGL / `/vendor/lib64` 相关（只有 `nvram_agent_binder` 的 binder 权限，与图形无关）；
+- **不是标签**：`ls -lZ` 显示 `/vendor/lib64/egl/*`、`libusc.so` 等全是
+  `u:object_r:same_process_hal_file:s0`，与 32 位同名文件一致 —— §9.21.3 的判断是对的。
+
+用**设备内核**（`losetup` + `mount -ro` 挂载 agui 原包）拿到权威尺寸，与我们的提取结果对比：
+
+| 文件 | 我们读到 | **权威** |
+| --- | --- | --- |
+| `libged.so` | 32,768 | **68,392** |
+| `libion_ulit.so` | 12,288 | **68,104** |
+| `libgralloc_extra.so` | 16,384 | **68,312** |
+| `libdpframework.so` | 745,472 | **794,840** |
+| `hw/hwcomposer.mt6761.so` | 643,072 | **662,072** |
+
+**19 / 29 个库被截断**。解码 `libged.so` 的 inode 立刻看清原因：
+
+```
+eh_magic=0xf30a entries=2 max=4 depth=0
+  slot 0: ee_block=0    ee_len=6  start=34703
+  slot 1: ee_block=15   ee_len=2  start=34709   ← 逻辑块号从 0 跳到 15！
+```
+
+两个 extent 之间**有一个 9 块的 hole**。这不是异常数据，而是 Android 64 位 `.so`
+**按 64 KiB 页对齐**的正常布局：两个 `PT_LOAD` 段之间的间隙本来就是全零（稀疏）。
+
+而旧代码是：
+
+```python
+data = i_block[12:]                       # i_block 只有 60 字节 → 只剩 48 = 4 条记录
+...
+yield (start, length)                     # ← ee_block 被丢掉了
+...
+blocks.extend(range(start, start + length))   # 按物理顺序直接拼
+```
+
+`file_blocks()` / `_read_any()` 拿到的是"物理块序列"，**没有逻辑位置信息**，
+于是 hole 被"塌陷"：68,392 字节的文件被写成 32,768 字节，而且第二个 extent 的数据
+还放错了位置（落在 24,576 而不是 61,440）。ELF 节头表因此跑到文件尾之外。
+
+### 9.22.4 为什么这个 bug 能一路穿过所有校验
+
+`build_wifi64_vendor.py` 原来的"每个库都是 ELF64"检查是：
+
+```python
+data = fs._read_any(i3, inode)[:20]       # 只读前 20 字节
+if data[:4] == b"\x7fELF" and data[4] != 2:
+    bad.append(...)
+```
+
+**截断的文件头依然完好** —— `\x7fELF` + `EI_CLASS=2` 一个字节不差。头 20 字节检查
+永远发现不了尾部丢失。`e2fsck` 也不管这个（文件系统是合法的，是**文件内容**错了）。
+
+### 9.22.5 修复（两处，2026-10-06）
+
+**① `port/ext4_read.py` —— 按逻辑块定位，hole 补零**
+
+```python
+def _extent_blocks(self, block):
+    """Yield (logical_block, start_block, count, initialized)."""
+    ...
+    if ee_len <= 32768:                    # 内核语义：<=32768 是已初始化
+        length, initialized = ee_len, True
+    else:                                  # >32768 是未初始化 extent，内容读作 0
+        length, initialized = ee_len - 32768, False
+    yield (ee_block, start, length, initialized)
+
+def read_inode_data(self, inode):
+    buf = bytearray(nblocks * bs)          # hole 保持全零
+    ...
+    buf[lblk*bs : lblk*bs + len(chunk)] = chunk     # 按逻辑块号落位
+    return bytes(buf[:size])
+```
+
+顺带修的：`ee_len == 32768` 原来被 `& 0x7FFF` 算成 0（现在正确）；fast symlink
+（目标存在 `i_block` 里、没有 extent 头）原来会直接抛异常，现在正确返回。
+
+**② 新增 `port/elf_integrity.py` —— 结构完整性门禁**（已接进 `build_wifi64_vendor.py`）
+
+要求程序头表、节头表、以及每个 `PT_LOAD`/`PT_DYNAMIC` 都在文件范围内。
+实测：**旧的坏副本 19/28 被抓出，修复后的 0/28**。
+
+### 9.22.6 验证（三重）
+
+1. **交叉验证读取器**：用修好的 `ext4_extract.py` 从 agui 原包重新提取，
+   与设备内核读出的权威副本比对 → **29/29 逐字节一致**（12,387,861 B，旧的是 11,640,469 B）。
+2. **重建 + 重刷**：vendor 只重刷 vendor 分区（**不需要再清数据**），
+   设备分区上的 lib64 与权威副本 → **29/29 逐字节一致**。
+3. **实机启动**：`sys.boot_completed=1`，约 30 秒进桌面。
+
+| 检查项 | 结果 |
+| --- | --- |
+| `ro.product.cpu.abi` / `ro.zygote` | `arm64-v8a` / `zygote64_32` ✅ |
+| `abilist` / `abilist64` | `arm64-v8a,armeabi-v7a,armeabi` / `arm64-v8a` |
+| 64 位进程 | `zygote64` `zygote` `surfaceflinger` `webview_zygote` |
+| `surfaceflinger` / `zygote` / `zygote_secondary` | `running` / `running` / `running`（原为 `restarting`） |
+| `bootanim` | `stopped`（桌面已起，已截屏确认） |
+| 内核模块 | `wlan_mt6761_axi` `wmt_chrdev_wifi` `bt_drv` `wmt_drv` 全部 insmod 成功 |
+| WMT | `[HIF-SDIO] mtk_wcn_wmt_func_ctrl: ... ok`、`BT_open: WMT turn on BT OK!` |
+| Wi-Fi 开/关 | 开→`Wi-Fi is enabled`；关→正常；**无满核卡死**（§9.19 修复生效） |
+| SELinux / panic | `Enforcing` / 无 panic |
+| 崩溃缓冲 | SurfaceFlinger 与 libEGL 的崩溃已消失 |
+
+### 9.22.7 遗留
+
+- `nvram_agent_binder` 仍在崩溃循环（**不影响开机与 Wi-Fi**）：phh GSI 的策略里
+  `nvram_agent_binder` 域无权读写 `/dev/binder`（`scontext=u:r:nvram_agent_binder:s0`
+  `tcontext=u:object_r:binder_device:s0` `tclass=chr_file`）。属 GSI 策略与 MTK vendor
+  预期间的缺口，与本包改动无关。需要用该服务（NVRAM 相关特性）时补一条 `allow` 即可。
+- `fpsgo.ko` / `met.ko` 仍为 32 位（同 agui 包），只影响调频。
+
+### 9.22.8 教训（值得复用到任何镜像操作）
+
+1. **比对尺寸要用可信来源**。Windows 上没有 ext4 用户态工具，**设备自带的内核就是
+   最好的 oracle**：`losetup` + `mount -ro`。靠"看起来能解析"来自证是不可靠的。
+2. **"文件头合法"≠"文件完整"**。凡是要搬运二进制（.so/.ko/固件），门禁必须查**尾部**。
+3. **稀疏文件是常态，不是例外**。ext4 的 `ee_block`、uninit extent、ELF 的页对齐 hole ——
+   任何"按物理顺序拼接"的实现都会在这些地方出错。
+4. **`dlerror()` 返回 NULL 时要往"依赖库损坏"方向查**，不要只盯着权限和命名空间。
+
+---
+
+*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）、`build_connectivity_modules.sh`（2026-10-04 重写）、`verify_build_script.py`（Gate #1-6）、`install_wifi_modules.sh`（vendor 分区自动加载）、`extract_modules.py`（裸 ext4 提 .ko，2026-10-06 增）、`audit_wmt_fb_workaround.py` + `disasm_arm64.py`（workaround 生效审计，2026-10-06 增）、`audit_scan_loop.py`（drain 循环出口门禁，2026-10-06 增）、`disasm_capstone.py`（Capstone 权威反汇编，2026-10-06 增）、`diff_func_insns.py`（两个构建的同函数逐指令 diff）、`ext4_inventory.py` / `ext4_extract.py` / `sparse.py` / `device_make_vendor64.sh` / `build_wifi64_vendor.py`（vendor 64 位适配链，2026-10-06 增）、`elf_integrity.py`（ELF 结构完整性门禁：头表/段必须都在文件内，2026-10-06 增）、`ci_push.py`（绕过交互式 credential helper 的推送，2026-10-06 增）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`；Archytas 全量原厂镜像（救砖包 `img/`）；**设备内核经 `losetup`+`mount` 读出的 `/vendor/lib64` 权威副本**（§9.22 用它定案）。*
