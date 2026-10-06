@@ -24,10 +24,14 @@
 | `flash_wifi64_fastboot.sh` | **一键刷机（fastboot，推荐）** | 见第四节；不用按键进 BROM、不用 mtkclient |
 | `flash_wifi64.sh` | 一键刷机（mtkclient / BROM） | 见第四节；需关机按住音量下进下载模式 |
 | `restore_via_twrp.sh` | **TWRP 回退 / 救砖** | 见第四节方式 C；设备能进 TWRP 时最省事，直接写裸分区 |
+| `resize_system_3gb.sh` | **扩容 system 分区到 3 GiB（可选）** | 见第四节方式 D；在 TWRP 里改 GPT，**会清空 /data** |
 
-**不需要扩容任何分区**：GSI 已按原机 system 分区尺寸（1,503,232,000 B）重新打包为
+**刷本包不需要扩容任何分区**：GSI 已按原机 system 分区尺寸（1,503,232,000 B）重新打包为
 1,499,136,000 B。agui 的 4G 包用的是同一构建的原始镜像（声明 **2.00 GiB**），
 必须扩容 system 分区才能刷；本包不需要。
+
+> 只有要刷**比 1.4 GiB 更大的**系统镜像（更大的 GSI、带 GApps 的、自己塞了东西的）时，
+> 才需要用 `resize_system_3gb.sh` 把 system 扩到 3 GiB —— 见第四节方式 D。
 
 ---
 
@@ -237,6 +241,70 @@ boot   18d8a3c5146395a2fce6d4af5f2a75349fc9cb27753062410f46d508808c7102  ✅
 vendor 4b5a3e9904922a0ff0803e84936a19148c0960386c5f7d1b2c16a4279861e73f  ✅
 system 552ced8462849d2f8812e232735ead663d5e626c3ec170efa8a7ac3e445d4ea4  ✅
 ```
+
+### 方式 D：扩容 system 分区到 3 GiB（可选，需 TWRP）
+
+装得下就不需要这一步。要刷 **大于 1.4 GiB** 的系统镜像时才用。必须在 **TWRP** 里做
+（改分区表时 `/data`、`/cache` 正被使用，在线改会让内核继续往旧偏移写，直接损坏数据）。
+
+```bash
+adb reboot recovery
+adb push resize_system_3gb.sh /tmp/                  # ★ 必须放 /tmp
+adb shell sh /tmp/resize_system_3gb.sh               # 默认只打印计划（预演）
+adb shell "APPLY=1 sh /tmp/resize_system_3gb.sh"     # 确认无误后执行
+```
+
+> **为什么必须放 `/tmp`**：脚本第一步就 `umount /data`。脚本若躺在
+> `/data/local/tmp/`，卸载后 shell 读不到后续内容，会跑到一半断掉。
+
+**它改了什么**：GPT 里 `system(#31)` 后面紧跟着 `vbmeta(#32)`、`cache(#33)`、
+`userdata(#34)`，四者 LBA 首尾相连、没有空隙。分区必须连续，所以 system 要变大，
+就必须把后面三位**整体向后平移** `delta = 新大小 − 旧大小` 个扇区
+（本机 delta = 3,355,456 扇区 = 1638 MiB）：
+
+| # | 名称 | 旧 LBA | 新 LBA | 大小 |
+|---|---|---|---|---|
+| 31 | `system` | 1802240–4738239 | 1802240–**8093695** | 1433.6 → **3072 MiB** |
+| 32 | `vbmeta` | 4738240–4767743 | 8093696–8123199 | 14.4 MiB（平移） |
+| 33 | `cache` | 4767744–5652479 | 8123200–9007935 | 432 MiB（平移） |
+| 34 | `userdata` | 5652480–30414814 | 9007936–30414814 | 11.8 GiB → 10.2 GiB |
+| 35 | `otp` | 30414815– | 不动 | |
+
+平移的代价与脚本的补偿：
+
+| 分区 | 后果 | 处理 |
+|---|---|---|
+| `vbmeta` | 内容留在旧 LBA | 改表**前**备份原内容 → 改表**后**写回新位置（sha256 复核） |
+| `cache` | 旧内容作废 | 新位置开头清零；fstab 带 `formattable`，首启自动重建 |
+| `userdata` | **数据全丢** | 同上。分区起点变了，旧文件系统不可能原地可用 |
+| `system` | **毫无影响** | 起始 LBA 没变，GSI 原样保留，**不需要重刷** |
+
+> **★ 扩容 system 必然清空 `/data`** —— 这不是脚本的取舍，是分区连续性的硬约束。
+
+**安全设计**：
+
+- 只依赖 TWRP 自带的 `sgdisk`（`/sbin/sgdisk`）；GPT 的 CRC32、备份表、last-usable
+  它一并处理，比手工拼 GPT 二进制安全得多。**注意该版本只认长选项**（`--print`
+  可以，`-p` 不行）。
+- 写表前：`sgdisk --backup` 全量 + 裸备份头/尾各 34 扇区。
+- 写表后：逐项比对 start/end/name，**任何不符立即 `--load-backup` 回滚**。
+- 改表**之后**内核里的分区表是旧的 → 后续按 LBA 的读写一律走 `$DISK` + `seek=`，
+  **绝不碰 `/dev/block/mmcblk0pNN`**（会写到旧偏移）。
+- 连续性预检：`system` 尾 +1 必须正好是下一个分区起点；平移链必须首尾相接；
+  链尾右端保持不动（多退少补都落在 userdata 尾部）——任一条不满足即拒绝执行。
+- 默认 `APPLY=0` 只预演；不在 recovery 时直接拒绝（除非 `FORCE=1`）。
+
+**完成后**：
+
+```bash
+adb reboot
+adb shell blockdev --getsize64 /dev/block/by-name/system    # 期望 3221225472
+adb shell blockdev --getsize64 /dev/block/by-name/userdata  # 期望 10960322048
+```
+
+> 多出来的空间是给"**刷**更大的镜像"用的：system 里现有 ext4 仍是 1.4 GiB。
+> 要让现有系统占满 3 GiB 得在**非挂载**状态下 `resize2fs`，而 system 是根文件系统，
+> 无法在线扩容 —— 正常也不会需要。
 
 ### 首次开机
 
