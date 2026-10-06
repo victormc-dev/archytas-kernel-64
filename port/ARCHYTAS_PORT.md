@@ -1801,4 +1801,110 @@ python port/disasm_capstone.py scanGetCurrentEssChnlList <ko> --lo <loop> --hi <
 
 ---
 
-*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）、`build_connectivity_modules.sh`（2026-10-04 重写）、`verify_build_script.py`（Gate #1-6）、`install_wifi_modules.sh`（vendor 分区自动加载）、`extract_modules.py`（裸 ext4 提 .ko，2026-10-06 增）、`audit_wmt_fb_workaround.py` + `disasm_arm64.py`（workaround 生效审计，2026-10-06 增）、`audit_scan_loop.py`（drain 循环出口门禁，2026-10-06 增）、`disasm_capstone.py`（Capstone 权威反汇编，2026-10-06 增）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*
+## 9.20 修复验证 + workaround 摘除 + 残留缺口（2026-10-06）✅ 死锁已消除
+
+§9.19 的两处改动（`-mpc-relative-literal-loads` + drain 屏障）与 §9.20 的 workaround 摘除，
+已全部落地并在真机上验证。
+
+### 9.20.1 构建侧结果（run `37410449753` full / `37412241394` fast lane）
+
+| 指标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `wlan_drv_gen4m.ko` ADRP(275/276) | **28021** | **0** |
+| `wmt_drv.ko` ADRP | 9217 | **0** |
+| `wmt_chrdev_wifi.ko` ADRP | 197 | **0** |
+| `bt_drv.ko` ADRP | 161 | **0** |
+| `wlan_drv_gen4m.ko` 体积 | 5 309 208 B | **3 913 696 B** |
+| `wmt_drv.ko` 体积 | 1 866 592 B | **1 388 312 B** |
+| Gate #6（drain 循环出口） | —（不存在） | **PASS** |
+
+ADRP 归零的意义：产出物**不再需要**内核侧 §8.3 的 `patch_adrp_reloc.py` 手术；
+该补丁保留为安全网（无 ADRP 时是空操作）。
+
+`scanGetCurrentEssChnlList` 反汇编（新出货字节，Capstone）：
+
+```
+0x114d50  sub  x0, x0, x3          ; ← 循环头，每趟重算
+0x114d54  add  x0, x0, x4
+0x114d58  ldp  x2, x1, [x0, #0x10]
+0x114d5c  cbz  x2, …
+0x114d60  str  x1, [x2, #8]
+0x114d64  cbz  x1, …
+0x114d68  str  x2, [x1]
+0x114d6c  ldr  w1, [x25, #0x10]    ; u4NumElem
+0x114d70  stp  xzr, xzr, [x0, #0x10]
+0x114d74  sub  w1, w1, #1
+0x114d78  str  w1, [x25, #0x10]
+0x114d7c  ldr  x0, [x25]           ; ★ 重载 head->prNext
+0x114d80  cmp  x0, x25             ; ★ 判定
+0x114d84  b.ne 0x114d50            ; ★ 条件回边
+```
+
+与 agui 参考版结构一致（`f9400321` vs 我们的 `f9400320`，仅寄存器分配不同）；
+`port/audit_scan_loop.py` 判 **GOOD**。
+
+### 9.20.2 真机验证（Wi-Fi 版设备，模块装入 `/vendor/lib/modules` 后重启）
+
+| 检查 | 结果 |
+| --- | --- |
+| 四个模块自动加载 | ✅ `wmt_drv` / `wmt_chrdev_wifi` / `wlan_mt6761_axi` / `bt_drv` |
+| `wlan0` UP + 关联 + 拿 IP | ✅ 192.168.1.63 / .64（多次重启） |
+| ping 网关 + 公网 | ✅ 3/3、3/3，rtt ≈ 21 ms / 47 ms |
+| **`svc wifi disable`** | ✅ **0.70 s 返回**（旧版 100% 死锁）；`Wifi HAL stopped` |
+| `main_thread` | ✅ 干净退出（旧版 state=R 满核空转） |
+| **`svc wifi enable`** | ✅ 0.69 s 返回；`Wifi HAL started` + `Configured chip in mode 0` |
+| 点亮屏幕后重新关联 | ✅ 10 s 内拿到 192.168.1.65 |
+| **`scanGetCurrentEssChnlList` 实跑** | ✅ dmesg：`Find Xiaomi_1202 in 21 BSSes, result 1` |
+| `scnEventScanDone` → `aisFsmRunEventScanDone` | ✅ 状态 0 完整跑完（**旧版就是死在这里**） |
+
+### 9.20.3 摘除 2c-2 / 2c-3 workaround
+
+§9.16 的两个 workaround 现在**默认不生效**（`ARCHYTAS_SUSPEND_WORKAROUND=1` 可恢复），与 agui 的零 workaround 参考版一致。
+理由（已在脚本注释与提交信息里留证）：
+
+- 它们当初要治的 `kalIoctlByBssIdx: wait main_thread timeout, duration:30720ms`，**是** §9.19 那个 drain 死循环的**症状**（main_thread 卡在 drain 里，任何等它的命令都超时），不是独立的 suspend/POWERDOWN bug。
+- 2c-2 把 `priv_driver_set_suspend_mode()` 变成裸 `return 0;`，让 wpa_supplicant 启用 Wi-Fi 后立刻发的
+  `SETSUSPENDMODE 1` 完全空转。
+- **A/B 实测**：带 workaround / 不带 workaround 两种模块，`wificond: NL80211_CMD_START_SCHED_SCAN failed: Invalid argument`
+  都会出现 —— 所以 PNO 失败**与 workaround 无关**（该假设已被证伪）。
+
+### 9.20.4 残留缺口（与死锁无关、不阻塞 Wi-Fi）：息屏时 PNO 报 EINVAL
+
+现象：`svc wifi disable` → `enable` 之后，**若屏幕处于 Dozing（`mWakefulness=Dozing`、`mGlobalDisplayState=OFF`）**，
+框架只能靠 PNO/scheduled scan 找网，而此时驱动返回：
+
+```
+wificond: NL80211_CMD_START_SCHED_SCAN failed: Invalid argument
+wificond: Failed to start pno scan
+```
+
+→ 一直不重新关联；**点亮屏幕（`input keyevent KEYCODE_WAKEUP`）后 10 s 内立刻重连**，
+因为亮屏时框架走普通扫描，而普通扫描一路正常（`[SCN:100:K2D] Scan flags=0x0` →
+`scnFsmSteps [IDLE]->[SCANNING]` → `scnEventScanDone` → `scanGetCurrentEssChnlList` 正常返回）。
+
+已定位到确切的返回点（Capstone 反汇编 + 源码对照）：
+
+```c
+/* os/linux/gl_cfg80211.c: mtk_cfg80211_sched_scan_start() */
+ucBssIndex = wlanGetBssIdx(ndev);
+if (!IS_BSS_INDEX_AIS(prGlueInfo->prAdapter, ucBssIndex))   /* :1812  (_BssIndex < KAL_AIS_NUM) */
+	return -EINVAL;                                          /* 唯一没有 DBGLOG 的出口 */
+```
+
+反汇编对应 `0xa67a0: and w0,w0,#0xff / cmp w0,#1 / b.hi 0xa6b68`，而
+`0xa6b68: mov w19, #-0x16` = **-22 (EINVAL)**。
+即：PNO 请求落在了一个 `netdev_priv()->ucBssIdx >= KAL_AIS_NUM(=2)` 的接口上
+（`wlanGetBssIdx()` 直接返回该字段）。dmesg 里也没有任何 `SCHED_SCAN_REQ_START_K2D`
+或 `No match sets` 记录，正好印证"卡在第一条静默检查"。
+
+**顺带记一个上游源码缺陷**（本项目不依赖它，但值得提）：该函数在 `prGlueInfo`
+赋值**之前**就用 `prGlueInfo->prAdapter`（第 3590 行 vs 第 3609 行）。此处侥幸无害，
+只因 `IS_BSS_INDEX_AIS` 展开后不使用 `_prAdapter`。
+
+**下一步（可选，独立课题）**：确认 PNO 是从哪个 netdev 发下来的（wlan1 / p2p0？），
+以及该 netdev 的 `ucBssIdx` 为何 ≥2；再决定是修正接口↔BSS 映射，还是让 `mtk_cfg80211_sched_scan_start`
+接受非 AIS 接口（厂商实现可能本就不支持在那些接口上 PNO）。
+
+---
+
+*生成/修订于 2026-10-02。工具链：自写 `dtb_dump.py`（反编译）、`dtb_diff.py`（全量 diff）、`make_wifi_template.py`（DTB 替换）、`analyze_oem_diff.py`（原厂对比）、`patch_wifi_dtb.py`（DTB 最小手术，2026-10-04 增）、`elf_symbols.py`（模块符号检查）、`build_connectivity_modules.sh`（2026-10-04 重写）、`verify_build_script.py`（Gate #1-6）、`install_wifi_modules.sh`（vendor 分区自动加载）、`extract_modules.py`（裸 ext4 提 .ko，2026-10-06 增）、`audit_wmt_fb_workaround.py` + `disasm_arm64.py`（workaround 生效审计，2026-10-06 增）、`audit_scan_loop.py`（drain 循环出口门禁，2026-10-06 增）、`disasm_capstone.py`（Capstone 权威反汇编，2026-10-06 增）、`diff_func_insns.py`（两个构建的同函数逐指令 diff）。权威证据：4G/ Wi-Fi 双方原厂 `boot.bin`+`dtbo.bin` 抽出的 DTB 与 `diff_main_oem.txt`/`diff_dtbo_oem.txt`。*
