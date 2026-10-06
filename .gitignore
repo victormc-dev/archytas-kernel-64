@@ -44,8 +44,9 @@ wifi64_pkg/
 极简arm64gsi可不扩容刷入.zip
 
 # 刷机现场的工作数据（体积大、可复现，不入库）
-_rollback/        # 刷机前的设备镜像与 /data 备份
-_diag/            # 排查过程中的 dump / 提取副本
-_fix/             # 修复 lib64 的中间产物
-_tools/           # 下载来的 platform-tools
+# 注意：gitignore **不支持行尾注释**——注释必须独占一行，否则整行会被当成模式。
+_rollback/
+_diag/
+_fix/
+_tools/
 

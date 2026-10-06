@@ -23,6 +23,7 @@
 | `stock/MT6761_Android_scatter.txt` | 分区表 | 查分区名/大小 |
 | `flash_wifi64_fastboot.sh` | **一键刷机（fastboot，推荐）** | 见第四节；不用按键进 BROM、不用 mtkclient |
 | `flash_wifi64.sh` | 一键刷机（mtkclient / BROM） | 见第四节；需关机按住音量下进下载模式 |
+| `restore_via_twrp.sh` | **TWRP 回退 / 救砖** | 见第四节方式 C；设备能进 TWRP 时最省事，直接写裸分区 |
 
 **不需要扩容任何分区**：GSI 已按原机 system 分区尺寸（1,503,232,000 B）重新打包为
 1,499,136,000 B。agui 的 4G 包用的是同一构建的原始镜像（声明 **2.00 GiB**），
@@ -197,6 +198,46 @@ mtk reset
 > **换 system 必须清数据**：原机 data 属于 Android 10（32 位），新 system 是
 > Android 9 arm64，不清会卡在开机动画/加密失败。
 
+### 方式 C：TWRP 回退 / 救砖（设备能进 recovery 时最省事）
+
+只要设备**能进 TWRP**（`adb devices` 显示 `recovery`），就**不需要 mtkclient、
+不需要 fastboot、不需要 BROM** —— TWRP 的 adbd 本来就是 root（`u:r:su:s0`），
+直接写裸分区即可：
+
+```bash
+adb devices                 # 应显示  <serial>  recovery
+bash restore_via_twrp.sh    # 刷 boot+vendor+system，并清 userdata
+```
+
+脚本每一步都可验证：
+
+| 步骤 | 做什么 | 为什么 |
+|---|---|---|
+| 1 | `mke2fs` 格式化 `/data` 后挂到 `/mnt/data` | 1.9 GiB 镜像没处放（`/tmp` 只有 994 MiB） |
+| 2 | `adb push` 三个镜像并贴 sha256 | push 会静默出错 |
+| 3 | `dd if=<img> of=by-name/<part> bs=4194304` | 写裸分区 |
+| 4 | **从分区读回**再 sha256 | 这才是"真的写进去了"的证据 |
+| 5 | 抹掉 `userdata` / `metadata` / `cache` 超级块 | 等同 `fastboot erase`；换 system 必须清 |
+| 6 | `reboot` | |
+
+> **⚠️ 本项目踩过的坑：TWRP 的 dd 是 toybox，不认 `bs=4M` 这种后缀。**
+> 它报 `dd: block size '4M': illegal number`，然后**静默什么都不写**。
+> 更阴的是：分区里还是旧内容，随后的"读回比对"也不会报错，只是 hash 对不上——
+> 很容易被当成"写入失败"，而不是"命令根本没执行"。必须写纯字节数：
+> `bs=4194304`（4 MiB）或 `bs=1048576`（1 MiB）。
+
+> 同一来源的另一个坑：TWRP 里 `losetup -f` 也是坏的（toybox），要用就必须
+> 显式指定 `/dev/block/loop0..7`。
+
+**实测（2026-10-06）**：刷 LineageOS 17.1 GSI 起不来 → 用本脚本回退，
+`reboot` 后 **30 秒**进桌面；三个分区读回哈希与本地镜像**逐字节一致**：
+
+```
+boot   18d8a3c5146395a2fce6d4af5f2a75349fc9cb27753062410f46d508808c7102  ✅
+vendor 4b5a3e9904922a0ff0803e84936a19148c0960386c5f7d1b2c16a4279861e73f  ✅
+system 552ced8462849d2f8812e232735ead663d5e626c3ec170efa8a7ac3e445d4ea4  ✅
+```
+
 ### 首次开机
 
 2~5 分钟（重建 data + 加载 GSI）。点亮屏幕后自检：
@@ -206,7 +247,7 @@ adb shell getprop ro.product.cpu.abi        # arm64-v8a
 adb shell getprop ro.product.cpu.abilist    # arm64-v8a,armeabi-v7a,armeabi
 adb shell getprop ro.zygote                 # zygote64_32
 adb shell getprop ro.product.cpu.abilist64  # arm64-v8a
-adb shell ls /vendor/lib64 | wc -l          # 29
+adb shell "find /vendor/lib64 -type f | wc -l"   # 29（顶层 22 项 = 20 个 .so + egl/ + hw/）
 adb shell ls /vendor/lib64                  # libusc.so / libsrv_um.so / egl/ / hw/ ...
 adb shell dmesg | grep -i "Find .* in .* BSSes"   # 扫描路径跑通（旧版死在这里）
 ```
@@ -226,6 +267,7 @@ adb shell dmesg | grep -i "Find .* in .* BSSes"   # 扫描路径跑通（旧版�
 
 - **不动 preloader / lk / lk2 / nvram / nvdata / protect\***，不会硬砖。
 - 出问题随时回退：
+  - **能进 TWRP 就直接 `bash restore_via_twrp.sh`**（方式 C，最快，不要 BROM/fastboot）；
   - `stock/` 里有原厂 `boot-stock-1754.img` / `dtbo.img` / `lk.bin` / `vbmeta.img`；
   - vendor / system 请用刷机前的备份（`BACKUP=1 FULL_BACKUP=1`），或救砖包
     （`mtkclient-archytas-一键救砖包.zip`，全量原厂 ROM）。
@@ -261,6 +303,11 @@ adb shell dmesg | grep -i "Find .* in .* BSSes"   # 扫描路径跑通（旧版�
 | SELinux | `Enforcing`（未被降级为 Permissive） |
 | 内核 panic | 无 |
 | 崩溃缓冲 | SurfaceFlinger / libEGL 的崩溃**已消失** |
+
+**回退路径也验证过（同日，方式 C）**：把 system 换成 LineageOS 17.1 GSI（Android 10，
+起不来）后，`bash restore_via_twrp.sh` 回退 —— `boot`/`vendor`/`system` 三个分区
+**读回哈希与本地镜像逐字节一致**，`reboot` 后 **30 秒**进系统，上表所有指标复测通过
+（`avc denied` 计数为 0）。
 
 ## 七、已知残留问题
 
