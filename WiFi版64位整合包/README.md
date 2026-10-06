@@ -267,7 +267,7 @@ adb shell "APPLY=1 sh /tmp/resize_system_3gb.sh"     # 确认无误后执行
 | 31 | `system` | 1802240–4738239 | 1802240–**8093695** | 1433.6 → **3072 MiB** |
 | 32 | `vbmeta` | 4738240–4767743 | 8093696–8123199 | 14.4 MiB（平移） |
 | 33 | `cache` | 4767744–5652479 | 8123200–9007935 | 432 MiB（平移） |
-| 34 | `userdata` | 5652480–30414814 | 9007936–30414814 | 11.8 GiB → 10.2 GiB |
+| 34 | `userdata` | 5652480–30414814 | 9007936–30414814 | 12.09 GiB → **10.45 GiB（缩小 1638 MiB）** |
 | 35 | `otp` | 30414815– | 不动 | |
 
 平移的代价与脚本的补偿：
@@ -279,7 +279,10 @@ adb shell "APPLY=1 sh /tmp/resize_system_3gb.sh"     # 确认无误后执行
 | `userdata` | **数据全丢** | 同上。分区起点变了，旧文件系统不可能原地可用 |
 | `system` | **毫无影响** | 起始 LBA 没变，GSI 原样保留，**不需要重刷** |
 
-> **★ 扩容 system 必然清空 `/data`** —— 这不是脚本的取舍，是分区连续性的硬约束。
+> **★ 扩容 system 会清空 `/data`，并让 `userdata` 缩小 delta。** 这不是脚本的取舍：
+> 磁盘尾部（`flashinfo` 之后）只剩 **34 扇区**，没有任何余量把整条链往后推 —— 若连
+> `otp`/`flashinfo` 一起平移，末端就会超出磁盘。所以 userdata 只能"右端钉死、起点右移"，
+> 净减 delta（本机 1638 MiB）。
 
 **安全设计**：
 
@@ -292,15 +295,29 @@ adb shell "APPLY=1 sh /tmp/resize_system_3gb.sh"     # 确认无误后执行
   **绝不碰 `/dev/block/mmcblk0pNN`**（会写到旧偏移）。
 - 连续性预检：`system` 尾 +1 必须正好是下一个分区起点；平移链必须首尾相接；
   链尾右端保持不动（多退少补都落在 userdata 尾部）——任一条不满足即拒绝执行。
+- ★ **TWRP 的 `/sbin/sh` 是 32 位算术**（实测 `$((2147483647+1))` = `-2147483648`，
+  `$((99999999*2048))` = `-1358432256`）。`TARGET_MIB*2048` 一旦越过 2³¹ 就回绕成
+  负数/小正数，能骗过所有基于 `$(( ))` 的边界检查。因此 `TARGET_MIB` 在**任何乘法
+  之前**先卡死（必须纯数字、≤6 位），且所有边界比较都在 **MiB 尺度**做
+  （被比较的中间值都 ≤ 磁盘扇区数，远离 2³¹）。
+- 三道边界守卫，**均已用负例实测会拦**：
+  ① `TARGET_MIB ≤ 磁盘可用上限`（本机 14029 MiB）；
+  ② 计划里每个分区的 `ns..ne` 都必须落在 `1..last_usable` 内；
+  ③ 平移链首尾相接。其中 ② 拦得住"链上中间分区越界"这种 ① 看不出的情形
+  （实测 `TARGET_MIB=14029` 被 ② 拦下：`#32 vbmeta 30533632..30563135` 越界）。
+- 要动的分区按 sgdisk 解析出的**实际分区号**逐个校验挂载状态，不靠硬编码的正则。
 - 默认 `APPLY=0` 只预演；不在 recovery 时直接拒绝（除非 `FORCE=1`）。
 
 **完成后**：
 
 ```bash
 adb reboot
-adb shell blockdev --getsize64 /dev/block/by-name/system    # 期望 3221225472
-adb shell blockdev --getsize64 /dev/block/by-name/userdata  # 期望 10960322048
+adb shell blockdev --getsize64 /dev/block/by-name/system    # 期望 3221225472 (=3072 MiB)
+adb shell blockdev --getsize64 /dev/block/by-name/userdata  # 期望 10960322048 (=10452 MiB，已扣掉 1638 MiB 缩容)
 ```
+
+> 这两个数就是 `system` 扩到 3072 MiB、`userdata` 缩小 1638 MiB 之后的精确结果
+> （脚本在"完成"一节是按本次计划**算出来打印**的，不再硬编码）。
 
 > 多出来的空间是给"**刷**更大的镜像"用的：system 里现有 ext4 仍是 1.4 GiB。
 > 要让现有系统占满 3 GiB 得在**非挂载**状态下 `resize2fs`，而 system 是根文件系统，

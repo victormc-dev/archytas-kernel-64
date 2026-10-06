@@ -18,9 +18,13 @@
 #    cache    —— 新位置开头清零；vendor fstab 里带 `formattable`，Android 首启自动重建
 #    userdata —— 新位置开头清零；fstab 带 `formattable,resize`，首启自动重建
 #                ★ 数据全部丢失，无法保留（分区起点都变了，旧文件系统不可能原地可用）
+#                ★ 而且 **userdata 会缩小 delta**：它的右端钉死不动（这样 otp/flashinfo
+#                  才不用动），起点右移 delta ⇒ 净减 delta。这是**唯一可行解**——
+#                  磁盘尾部（flashinfo 之后）只剩 34 扇区，没有任何余量让整条链后移。
 #    system   —— 起始 LBA 没变，**里面的 GSI 原样保留**，不会被重刷
 #
-#  结论：扩容 system 会清空 /data。这不是脚本的取舍，是分区连续性的硬约束。
+#  结论：扩容 system 会清空 /data，并让 userdata 缩小 delta。这不是脚本的取舍，
+#        是"分区必须连续 + 磁盘尾部没有余量"两个硬约束共同决定的结果。
 #
 #  ---------------------------------------------------------------------------
 #  用法（必须让设备进入 TWRP 后再跑）
@@ -44,6 +48,10 @@
 #      任何不符立即 --load-backup 回滚。
 #    · 改表之后 kernel 里的分区表是**旧的**，所以后面所有按 LBA 的读写一律
 #      走 `$DISK` + seek=，绝不用 /dev/block/mmcblk0pNN（否则会写到旧偏移）。
+#    · ★ TWRP 的 /sbin/sh 是 **32 位算术**（实测 $((2147483647+1)) = -2147483648，
+#      $((99999999*2048)) = -1358432256）。所以所有可能溢出的乘法都被刻意绕开：
+#      TARGET_MIB 在任何乘法之前先卡死位数与上限；边界比较一律在 MiB 尺度做，
+#      被比较的中间值都 ≤ 磁盘扇区数，远离 2^31。
 # ============================================================================
 set -u
 
@@ -60,6 +68,14 @@ SPM=2048                       # 每 MiB 的 512B 扇区数
 die() { echo "!! $*" >&2; exit 1; }
 hdr() { echo; echo "=== $* ==="; }
 mib() { echo "$(( $1 / SPM ))"; }
+
+# ★ TARGET_MIB 必须在**任何乘法之前**卡死。本机 TWRP 的 /sbin/sh 是 32 位算术
+#   （已实测：$((2147483647+1)) = -2147483648，$((99999999*2048)) = -1358432256），
+#   TARGET_MIB*2048 一旦越过 2^31 就回绕成负数/小正数，能把后面所有 $(( )) 边界
+#   检查骗过去。所以这里先做纯字符串/小整数校验，把输入限制在安全区。
+case "$TARGET_MIB" in ''|*[!0-9]*) die "TARGET_MIB 必须是正整数（当前 '$TARGET_MIB'）";; esac
+[ "$TARGET_MIB" -ge 1 ] || die "TARGET_MIB 必须 ≥ 1"
+[ "${#TARGET_MIB}" -le 6 ] || die "TARGET_MIB 数值过大（'$TARGET_MIB'，最多 6 位）"
 
 # ---------------------------------------------------------------- 0. 工具/环境
 SGDISK=$(command -v sgdisk 2>/dev/null || true)
@@ -91,11 +107,7 @@ for m in /sdcard /data /cache /system /vendor /mnt/v; do
     umount "$m" 2>/dev/null && echo "  已卸载 $m" || echo "  !! umount $m 失败"
   fi
 done
-if mount | grep -qE "mmcblk0p3[0-4]|by-name/(system|vendor|cache|userdata)"; then
-  echo "  仍在挂载："; mount | grep -E "mmcblk0p3[0-4]"
-  die "目标分区仍被挂载，请手动 umount 后重跑"
-fi
-echo "  ok：相关分区均已卸载"
+echo "  已按挂载点尝试卸载。要动的分区号得读完分区表才知道，稍后按**设备节点**再做一次权威校验。"
 
 # ------------------------------------------------------------ 2. 读当前分区表
 hdr "2. 当前分区表"
@@ -114,8 +126,24 @@ SYS_END=$(echo "$SYS_ROW"   | awk '{print $3}')
 SYS_CODE=$(echo "$SYS_ROW"  | awk '{print $4}')
 SYS_GUID=$("$SGDISK" --info="$SYS_NUM" "$DISK" 2>/dev/null | awk '/Partition unique GUID/{print $4}')
 
+# 磁盘总扇区数（512B 逻辑扇区）。备份 GPT 占磁盘最后 34 扇区
+# （entries 32 扇区 + header 1 扇区，末尾还留 1），故最后可用 LBA = DSZ - 34。
+DSZ=$(cat "/sys/class/block/$(basename "$DISK")/size" 2>/dev/null)
+case "$DSZ" in ''|*[!0-9]*) die "读不到磁盘扇区数（/sys/class/block/$(basename "$DISK")/size）";; esac
+LAST_USABLE=$(( DSZ - 34 ))
+
+# ★ 先在 MiB 尺度比较，再算扇区：/sbin/sh 是 32 位算术（见上文），
+#   而 (LAST_USABLE - SYS_START + 1) 与它除以 SPM 的结果都 ≤ 磁盘扇区数，
+#   远小于 2^31，绝不会溢出；TARGET_MIB*2048 却会。所以顺序很关键。
+MAX_MIB=$(( (LAST_USABLE - SYS_START + 1) / SPM ))
+CUR_MIB=$(mib $(( SYS_END - SYS_START + 1 )))
+[ "$TARGET_MIB" -le "$MAX_MIB" ] \
+  || die "目标 ${TARGET_MIB} MiB 超出磁盘可用范围：从 $SYS_NAME 起始 LBA $SYS_START 算，最大只能到 $MAX_MIB MiB。"
+[ "$TARGET_MIB" -gt "$CUR_MIB" ] \
+  || die "目标 ${TARGET_MIB} MiB 不大于现有 $CUR_MIB MiB——本脚本只扩容不缩容。"
+
 NEW_SYS_END=$(( SYS_START + TARGET_MIB * SPM - 1 ))
-[ "$NEW_SYS_END" -gt "$SYS_END" ] || die "目标 ${TARGET_MIB} MiB 不大于现有大小——本脚本只扩容不缩容"
+[ "$NEW_SYS_END" -le "$LAST_USABLE" ] || die "内部不一致：新尾 $NEW_SYS_END > 最后可用 $LAST_USABLE"
 DELTA=$(( NEW_SYS_END - SYS_END ))
 
 # ------------------------------------------------- 3. 找出要平移的分区并校验连续性
@@ -135,6 +163,28 @@ while read -r n s e c name; do
   PREV=$e
 done < "$WORK/movers.txt"
 LAST_MOVER_END=$PREV
+
+# 现在知道要动哪些分区了（system + 平移链）。按**设备节点**做一次权威挂载校验，
+# 不再依赖硬编码的分区号正则（那玩意在分区号不同的机器上会静默漏检）。
+TOUCH_NUMS="$SYS_NUM"
+while read -r n s e c name; do TOUCH_NUMS="$TOUCH_NUMS $n"; done < "$WORK/movers.txt"
+for n in $TOUCH_NUMS; do
+  d="$DISK$n"
+  mount | grep -qE "(^|[[:space:]])$d " && umount "$d" 2>/dev/null
+done
+sync
+for n in $TOUCH_NUMS; do
+  d="$DISK$n"
+  if mount | grep -qE "(^|[[:space:]])$d "; then
+    mount | grep -E "$d "
+    die "分区 #$n ($d) 仍被挂载，拒绝继续（在挂载状态下改表会让内核继续写旧偏移）"
+  fi
+done
+if mount | grep -qE "by-name/(system|vendor|cache|userdata)"; then
+  mount | grep -E "by-name/(system|vendor|cache|userdata)"
+  die "有目标分区经 by-name 仍被挂载，拒绝继续"
+fi
+echo "  ok：要动的分区（#$TOUCH_NUMS）均已卸载"
 
 # ------------------------------------------------------------- 4. 计算新布局
 P="$WORK/plan.txt"; : > "$P"
@@ -157,6 +207,13 @@ done < "$WORK/movers.txt"
 [ "$CURSOR" = "$(( LAST_MOVER_END + 1 ))" ] \
   || die "内部校验失败：平移链尾部未对齐（cursor=$CURSOR，期望 $(( LAST_MOVER_END + 1 )))"
 
+# 逐项边界校验：每个分区都必须落在 [1, LAST_USABLE] 且 ns <= ne。
+# 这条能拦住 TARGET_MIB 过大导致链上某个分区被推到磁盘外（含 GPT 备份表）的情况。
+while read -r n os oe ns ne c name g; do
+  [ "$ns" -ge 1 ] && [ "$ne" -le "$LAST_USABLE" ] && [ "$ns" -le "$ne" ] \
+    || die "计划越界：#$n ($name) 新区间 $ns..$ne 不在 1..$LAST_USABLE 内——多半是 TARGET_MIB 过大"
+done < "$P"
+
 # --------------------------------------------------------------- 5. 打印计划
 hdr "3. 变更计划"
 printf '  %-4s %-10s %11s %11s   %s\n' "#" "name" "old(MiB)" "new(MiB)" "new LBA start..end"
@@ -166,7 +223,12 @@ while read -r n os oe ns ne c name g; do
 done < "$P"
 echo
 echo "  system  : $(mib $(( SYS_END - SYS_START + 1 ))) MiB -> ${TARGET_MIB} MiB  (+$(( DELTA / SPM )) MiB)"
-echo "  平移量  : delta = $DELTA 扇区 ($(( DELTA * SEC / 1048576 )) MiB)"
+echo "  平移量  : delta = $DELTA 扇区 ($(( DELTA / SPM )) MiB)"
+# 明确把 userdata 的缩容摆出来。磁盘尾部（flashinfo 之后）只有 34 扇区，没有余量，
+# 所以扩容占用的空间**只能**由 userdata 让出——这不是取舍，是唯一可行解。
+awk -v spm="$SPM" '$7 == "userdata" {
+  printf "  userdata: %d MiB -> %d MiB  (-%d MiB，磁盘尾部无余量，扩容份额只能由它让出)\n",
+         ($3-$2+1)/spm, ($5-$4+1)/spm, (($3-$2+1)-($5-$4+1))/spm }' "$P"
 echo
 echo "  ★ cache 与 userdata 会被清空并由 Android 首启自动重建（/data 数据将丢失）"
 echo "  ★ system 起始 LBA 不变，现有系统内容保留"
@@ -184,8 +246,6 @@ TS=$(date +%Y%m%d-%H%M%S 2>/dev/null); [ -n "$TS" ] || TS=$$
 BK="$WORK/gpt_backup_$TS.bin"
 "$SGDISK" --backup="$BK" "$DISK" >/dev/null 2>&1 && echo "  GPT 全量备份 -> $BK" \
   || die "GPT 备份失败，中止（未做任何修改）"
-DSZ=$(cat "/sys/class/block/$(basename "$DISK")/size" 2>/dev/null)
-[ -n "$DSZ" ] || die "读不到磁盘扇区数"
 $DD if="$DISK" of="$WORK/gpt_head_$TS.bin" bs=$SEC count=34                        2>/dev/null
 $DD if="$DISK" of="$WORK/gpt_tail_$TS.bin" bs=$SEC skip=$(( DSZ - 34 )) count=34   2>/dev/null
 echo "  裸 GPT 头/尾 -> $WORK/gpt_head_$TS.bin  $WORK/gpt_tail_$TS.bin"
@@ -204,15 +264,16 @@ fi
 
 # -------------------------------------------------------------- 7. 写新分区表
 hdr "5. 写入新分区表 (sgdisk)"
-ARGS=""
-while read -r n os oe ns ne c name g; do ARGS="$ARGS --delete=$n"; done < "$P"
+# 用 POSIX 的 `set -- "$@" ...` 积累 argv，而不是拼一个字符串再 `set -- $ARGS`——
+# 后者会做 word splitting，且如果分区名/GUID 里出现空白、`*` 之类会被切坏或 glob。
+set --
+while read -r n os oe ns ne c name g; do set -- "$@" "--delete=$n"; done < "$P"
 while read -r n os oe ns ne c name g; do
-  ARGS="$ARGS --new=$n:$ns:$ne --typecode=$n:$c --change-name=$n:$name"
-  [ -n "$g" ] && ARGS="$ARGS --partition-guid=$n:$g"
+  set -- "$@" "--new=$n:$ns:$ne" "--typecode=$n:$c" "--change-name=$n:$name"
+  [ -n "$g" ] && set -- "$@" "--partition-guid=$n:$g"
 done < "$P"
-echo "  sgdisk$ARGS  $DISK"
+echo "  sgdisk $*  $DISK"
 
-set -- $ARGS
 if ! "$SGDISK" "$@" "$DISK"; then
   echo "  !! sgdisk 写入失败，从备份回滚……"
   if "$SGDISK" --load-backup="$BK" "$DISK"; then echo "  已回滚到原分区表"; else echo "  !! 回滚亦失败，请用 $BK 手工恢复"; fi
@@ -256,8 +317,12 @@ hdr "8. 作废 cache / userdata 的旧内容（首启自动重建）"
 while read -r n os oe ns ne c name g; do
   case "$name" in
     cache|userdata)
+      # 只要破坏 fs 的**主**超级块（位于 fs 起始 1 MiB 内）就能让首启的 mount 失败，
+      # 从而触发 fstab 的 formattable 重建。这里清 4 MiB 留足余量；备份超级块在
+      # fs 起始 128 MiB 之后，但 ext4 默认**不会**自动回退到备份 sb（那要显式 sb=），
+      # 所以无需清。反正这两块数据本来就要丢。
       echo "  清零 $name 新位置开头 @$ns"
-      $DD if=/dev/zero of="$DISK" bs=$SEC seek="$ns" count=2048 conv=notrunc 2>/dev/null
+      $DD if=/dev/zero of="$DISK" bs=$SEC seek="$ns" count=8192 conv=notrunc 2>/dev/null
       ;;
   esac
 done < "$P"
@@ -273,11 +338,13 @@ echo "    adb pull $WORK/gpt_head_$TS.bin"
 echo "    adb pull $WORK/gpt_tail_$TS.bin"
 [ -n "$VB_NS" ] && echo "    adb pull $WORK/vbmeta_$TS.bin"
 echo
+SYS_EXP=$(awk -v nm="$SYS_NAME" '$7 == nm { print ($5-$4+1)*512 }' "$P")
+UD_EXP=$(awk '$7 == "userdata" { print ($5-$4+1)*512 }' "$P")
 echo "  下一步："
 echo "    1) reboot                     # 重启进 Android（首启会重建 cache/userdata，稍慢）"
-echo "    2) 校验新容量："
-echo "         adb shell blockdev --getsize64 /dev/block/by-name/system   # 期望 3221225472"
-echo "         adb shell blockdev --getsize64 /dev/block/by-name/userdata # 期望 10960322048"
+echo "    2) 校验新容量（期望值由本次计划算出，不是硬编码）："
+echo "         adb shell blockdev --getsize64 /dev/block/by-name/$SYS_NAME   # 期望 $SYS_EXP"
+[ -n "$UD_EXP" ] && echo "         adb shell blockdev --getsize64 /dev/block/by-name/userdata # 期望 $UD_EXP"
 echo
 echo "  说明：system 里现有的 ext4 仍是 1.4 GiB。多出来的空间是给"
 echo "        \"刷更大的镜像\"用的；要让现有系统占满 3 GiB 需要在非挂载状态下"
