@@ -50,3 +50,7 @@ _diag/
 _fix/
 _tools/
 
+# app-patch/ 下重新打包出的第三方 APK（400 MB 级，版权/分发受限，不入库；
+# 脚本和 README 仍然入库，APK 可由脚本一键重新生成）
+app-patch/*.apk
+

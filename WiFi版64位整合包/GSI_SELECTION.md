@@ -141,3 +141,31 @@ $A shell mount | grep ' / '              # system 是否挂 / → SAR 判定
 $A shell cat /vendor/etc/fstab.mt6761    # system → / 即 SAR
 $A shell ls -d /system/lib64/vndk-*      # GSI 自带的 VNDK 版本
 ```
+
+---
+
+## 五、升级到 Android 10 后的 app 兼容性（2026-10-06 实测）
+
+刷上 Android 10 后，雷鸟配套应用 **`com.rayneo.venus.pub`（RayNeo iO）秒崩**。
+排查结论**与 GSI 精简、与 vendor 移植都无关**，是 Flutter 与 GPU 驱动的兼容问题：
+
+| 环节 | 事实 |
+|---|---|
+| GPU | PowerVR（`libIMGegl.so`）；GLES 硬件加速正常（`glLoadingCount=14 / 失败 0`） |
+| Vulkan | 不可用（`vulkanVersion=0`，无 ICD） |
+| Flutter | Impeller **在 API ≥ 29 才启用** → Android 10 上启用，Vulkan 失败后回退 **GLES-Impeller** |
+| 失败点 | GLES-Impeller 要 `EGL_PBUFFER_BIT` 的 offscreen config，**PowerVR EGL 驱动不提供** |
+| 崩溃 | `raster` 线程空指针（`Could not choose offscreen config` → libflutter 未判空） |
+| **Android 9 为何正常** | API 28 → 走 **Skia GL**（window surface + FBO，不要 pbuffer config） |
+
+**修法**：给 APK 的 AndroidManifest 注入
+`io.flutter.embedding.android.ImpellerBackend=none` + `EnableImpeller=false`，重签名安装。
+（Intent 参数 `--ez disable-impeller` **无效** —— 该 app 自缓存 FlutterEngine，绕过了
+`FlutterShellArgs.fromIntent()`。）
+
+**⚠️ 通用性**：这不是这一个 app 的问题。**任何 Flutter 应用**在这类
+「PowerVR / 老 EGL 驱动 + Android 10+」设备上都会中招；
+`fastboot flash system` 回 Android 9 也能规避。
+
+完整原理、复现判据、以及本机无 JDK 情况下的 AXML 注入 + v1 签名实现，
+见仓库 **`app-patch/README.md`**。
