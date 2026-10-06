@@ -54,3 +54,11 @@ _tools/
 # 脚本和 README 仍然入库，APK 可由脚本一键重新生成）
 app-patch/*.apk
 
+# device-patch/ 设备端自包含补丁工具链（本机临时构建物：debian 包缓存、406 MB 的
+# 重打包 APK、可重定位 rootfs）——体积大，不入库，可由 build_rootfs.py 重新生成。
+# ★ 注意：device/keys/ 下是**签名私钥**，任何时候都不要入库。
+device-patch/_build/
+device-patch/deploy/pyrootfs.tar.gz
+device-patch/device/keys/
+device-patch/*.apk
+
