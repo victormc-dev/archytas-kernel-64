@@ -108,7 +108,8 @@ system-arm64-ab-vanilla-nosu.img        # Android 10 的普通版，无需 vndkl
 | **Wi-Fi** | `wlan0` UP + **拿到 IP `192.168.1.72/24`**；`wpa_supplicant` running；HAL running；`dumpsys wifi` → `StaEnabledState`→`ConnectedState`→**`CompletedState`**；内核 `halSetFWOwn` / `nicUpdateLinkQuality Rssi=-48` / `mtk_cfg80211_get_station link speed=867` |
 | root | `adb root` **不生效**（GSI 的 adbd 不自动提权），但镜像自带 `su`（`/system/xbin/su`，`u:r:phhsu_daemon:s0`）——用 `su -c "…"` |
 | 分区容量 | 刷后复核仍是原厂值：system 1,503,232,000 / vendor 419,430,400 / userdata 12,678,315,520 / cache 452,984,832 |
-| UI | 截图确认：状态栏（Wi-Fi、信号、电池）、中文设置页、导航栏全正常 |
+| **浏览器联网** | 用设备浏览器实际打开 `rayneo.cn` —— 网页**完整渲染**（图片 + 文字 + 版式），DNS / DHCP / 路由全链路可用（不只是"拿到 IP"） |
+| UI | 截图确认：状态栏（Wi-Fi、信号、电池）、中文设置页（显示「Android 版本 10」）、AOSP 输入法、导航栏全正常 |
 
 ### 已知 SELinux 拒绝（68 条，无新增致命项）
 
