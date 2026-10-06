@@ -119,7 +119,12 @@ class Ext4:
                 if length:
                     yield (ee_block, start, length, initialized)
             else:
-                ei_block, ei_leaf_lo, ei_leaf_hi, _ = struct.unpack('<IIHI', rec)
+                # An index record is `ext4_extent_idx`: ei_block(4) +
+                # ei_leaf_lo(4) + ei_leaf_hi(2) + ei_unused(2) = **12** bytes.
+                # (An earlier '<IIHI' here asked for 14 and therefore threw on
+                # every file whose extent tree had depth >= 1 -- small vendor
+                # libs never did, multi-MB /system files always do.)
+                ei_block, ei_leaf_lo, ei_leaf_hi, _ = struct.unpack('<IIHH', rec)
                 leaf = ei_leaf_lo | (ei_leaf_hi << 32)
                 yield from self._extent_blocks(self.read_block(leaf))
 
