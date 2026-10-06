@@ -286,7 +286,7 @@ adb shell "APPLY=1 sh /tmp/resize_system_3gb.sh"     # 确认无误后执行
 
 **安全设计**：
 
-- 只依赖 TWRP 自带的 `sgdisk`（`/sbin/sgdisk`）；GPT 的 CRC32、备份表、last-usable
+- GPT 处理只依赖 TWRP 自带的 `sgdisk`（`/sbin/sgdisk`）；GPT 的 CRC32、备份表、last-usable
   它一并处理，比手工拼 GPT 二进制安全得多。**注意该版本只认长选项**（`--print`
   可以，`-p` 不行）。
 - 写表前：`sgdisk --backup` 全量 + 裸备份头/尾各 34 扇区。
@@ -306,6 +306,14 @@ adb shell "APPLY=1 sh /tmp/resize_system_3gb.sh"     # 确认无误后执行
   ③ 平移链首尾相接。其中 ② 拦得住"链上中间分区越界"这种 ① 看不出的情形
   （实测 `TARGET_MIB=14029` 被 ② 拦下：`#32 vbmeta 30533632..30563135` 越界）。
 - 要动的分区按 sgdisk 解析出的**实际分区号**逐个校验挂载状态，不靠硬编码的正则。
+- 依赖工具在**做任何事之前**全部解析并实测：`sgdisk` / `dd` / `awk` / `sha256sum`。
+  `sha256sum` 不只看存在性——还要拿 `sha256("abc")` 的已知向量
+  （`ba7816bf…20015ad`）**实算验证**。探测链：bare 名 → `/sbin/sha256sum` →
+  `/system/bin/sha256sum` → `toybox sha256sum`；全部不可用或算错则立刻退出。
+  为什么不能只查存在性：一个"在但算错"的 `sha256sum` 会返回 0 且给出垃圾哈希，
+  vbmeta 写回校验就会拿错哈希去比对，**比没有更危险**。已实测本机
+  TWRP 3.5.2_9-0 的 `/sbin/sha256sum` 正确（toybox 符号链接，`PATH=/sbin:/system/bin`
+  可直接命中）——但换成别的构建（例如只提供 busybox 的 TWRP）时这层兜底才有用。
 - 默认 `APPLY=0` 只预演；不在 recovery 时直接拒绝（除非 `FORCE=1`）。
 
 **完成后**：

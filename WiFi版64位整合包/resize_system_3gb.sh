@@ -46,6 +46,8 @@
 #      一并处理，比手工拼 GPT 二进制安全得多。
 #    · 改表前先 sgdisk --backup + 裸备份头/尾各 34 扇区；写表后逐项比对，
 #      任何不符立即 --load-backup 回滚。
+#    · 依赖工具在做任何事之前全部解析并**实测**：sgdisk/dd/awk/sha256sum。
+#      sha256sum 不只看存在性，还拿 sha256("abc") 的已知向量验它算得对。
 #    · 改表之后 kernel 里的分区表是**旧的**，所以后面所有按 LBA 的读写一律
 #      走 `$DISK` + seek=，绝不用 /dev/block/mmcblk0pNN（否则会写到旧偏移）。
 #    · ★ TWRP 的 /sbin/sh 是 **32 位算术**（实测 $((2147483647+1)) = -2147483648，
@@ -84,6 +86,25 @@ SGDISK=$(command -v sgdisk 2>/dev/null || true)
 DD=$(command -v dd 2>/dev/null || true)
 [ -n "$DD" ] || die "找不到 dd"
 command -v awk >/dev/null 2>&1 || die "找不到 awk"
+
+# ★ sha256sum：vbmeta 写回校验要用。实测本机 TWRP 3.5.2_9-0 有 /sbin/sha256sum
+#   （toybox 的符号链接，PATH=/sbin:/system/bin 可直接命中）。但别的 TWRP 构建
+#   可能只提供 `toybox sha256sum` 子命令，也可能二进制在但被裁坏——所以不能只
+#   `command -v`，还要**实算一个已知向量**确认它真的算得对：存在但算错比不存在
+#   更危险（会拿一个错误哈希去比对，反而误判为"写回失败"或更糟）。
+#   探测顺序：bare 名 → 绝对路径 → toybox 子命令。
+SHA_VEC=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad   # sha256("abc")
+SHA256=""
+for c in sha256sum /sbin/sha256sum /system/bin/sha256sum; do
+  if command -v "$c" >/dev/null 2>&1 && [ "$(printf abc | "$c" 2>/dev/null | awk '{print $1}')" = "$SHA_VEC" ]; then
+    SHA256="$c"; break
+  fi
+done
+if [ -z "$SHA256" ] && [ "$(printf abc | toybox sha256sum 2>/dev/null | awk '{print $1}')" = "$SHA_VEC" ]; then
+  SHA256="toybox sha256sum"          # 故意留空格：下面按 $SHA256 展开做词分割
+fi
+[ -n "$SHA256" ] \
+  || die "找不到可用的 sha256sum（vbmeta 写回校验依赖它）。已探测 sha256sum / /sbin / /system/bin / toybox 子命令，均不可用或算错。"
 [ -b "$DISK" ] || die "$DISK 不是块设备"
 [ "$(id -u)" = 0 ] || die "需要 root（TWRP 的 adb shell 本来就是 root）"
 
@@ -96,6 +117,8 @@ mkdir -p "$WORK" || die "无法创建 $WORK"
 hdr "0. 环境"
 echo "  disk      : $DISK"
 echo "  sgdisk    : $SGDISK"
+echo "  dd        : $DD"
+echo "  sha256sum : $SHA256"
 echo "  recovery  : $(getprop ro.twrp.version 2>/dev/null)"
 echo "  目标大小  : ${TARGET_MIB} MiB ($(( TARGET_MIB / 1024 )) GiB = $(( TARGET_MIB * SPM )) 扇区)"
 if [ "$APPLY" = 1 ]; then echo "  模式      : ★ 执行（会写盘）"; else echo "  模式      : 预演（只打印计划）"; fi
@@ -306,8 +329,8 @@ if [ -n "$VB_NS" ]; then
   hdr "7. 把 vbmeta 内容写回新位置"
   $DD if="$WORK/vbmeta_$TS.bin" of="$DISK" bs=$SEC seek="$VB_NS" conv=notrunc 2>/dev/null
   sync
-  H1=$(sha256sum "$WORK/vbmeta_$TS.bin" | awk '{print $1}')
-  H2=$($DD if="$DISK" bs=$SEC skip="$VB_NS" count="$VB_SZ" 2>/dev/null | sha256sum | awk '{print $1}')
+  H1=$($SHA256 "$WORK/vbmeta_$TS.bin" | awk '{print $1}')
+  H2=$($DD if="$DISK" bs=$SEC skip="$VB_NS" count="$VB_SZ" 2>/dev/null | $SHA256 | awk '{print $1}')
   [ "$H1" = "$H2" ] && echo "  vbmeta 已写回 @$VB_NS（sha256 $H1 一致 ✓）" \
                     || die "vbmeta 写回校验失败（$H1 != $H2）"
 fi
