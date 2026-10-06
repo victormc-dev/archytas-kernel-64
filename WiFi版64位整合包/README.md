@@ -251,7 +251,7 @@ bash restore_via_twrp.sh    # 刷 boot+vendor+system，并清 userdata
 > 同一来源的另一个坑：TWRP 里 `losetup -f` 也是坏的（toybox），要用就必须
 > 显式指定 `/dev/block/loop0..7`。
 
-**实测（2026-10-06）**：刷 LineageOS 17.1 GSI 起不来 → 用本脚本回退，
+**实测（2026-10-06）**：刷 LineageOS 17.1 GSI（`avS` / aonly 变体）起不来 → 用本脚本回退，
 `reboot` 后 **30 秒**进桌面；三个分区读回哈希与本地镜像**逐字节一致**：
 
 ```
@@ -259,6 +259,10 @@ boot   18d8a3c5146395a2fce6d4af5f2a75349fc9cb27753062410f46d508808c7102  ✅
 vendor 4b5a3e9904922a0ff0803e84936a19148c0960386c5f7d1b2c16a4279861e73f  ✅
 system 552ced8462849d2f8812e232735ead663d5e626c3ec170efa8a7ac3e445d4ea4  ✅
 ```
+
+> **后续（同日）**：换成 **`bvS`（ab 变体）** 后同一个 LineageOS 17.1 **刷入即开机成功**
+> —— 起不来的原因是**变体选错**（本机是 SAR，要用 `b`/ab，不是 `a`/aonly）。
+> 详见 `GSI_SELECTION.md` 第四节。
 
 ### 方式 D：扩容 system 分区到 3 GiB（可选，需 TWRP）
 
@@ -434,10 +438,24 @@ adb shell dmesg | grep -i "Find .* in .* BSSes"   # 扫描路径跑通（旧版�
 | 内核 panic | 无 |
 | 崩溃缓冲 | SurfaceFlinger / libEGL 的崩溃**已消失** |
 
-**回退路径也验证过（同日，方式 C）**：把 system 换成 LineageOS 17.1 GSI（Android 10，
-起不来）后，`bash restore_via_twrp.sh` 回退 —— `boot`/`vendor`/`system` 三个分区
-**读回哈希与本地镜像逐字节一致**，`reboot` 后 **30 秒**进系统，上表所有指标复测通过
-（`avc denied` 计数为 0）。
+**回退路径也验证过（同日，方式 C）**：把 system 换成 LineageOS 17.1 GSI（`avS`，
+aonly 变体，起不来）后，`bash restore_via_twrp.sh` 回退 —— `boot`/`vendor`/`system`
+三个分区**读回哈希与本地镜像逐字节一致**，`reboot` 后 **30 秒**进系统，上表所有指标
+复测通过（`avc denied` 计数为 0）。
+
+**再来一次（同日稍晚）**：把同一个 LineageOS 17.1 换用 **`bvS`（ab 变体）** 精简后
+`fastboot flash system` —— **这次直接开机成功**，Android 10 起来、Wi-Fi 自动连上 AP：
+
+| 项 | 值 |
+|---|---|
+| `ro.build.version.release` / `sdk` | **10** / **29** |
+| vendor fingerprint | 仍是原厂 `…:9/PPR1.180610.011/1754`（跨版本共存） |
+| 首启 | adb 45 s、**55 s 进桌面**；二次重启同样 55 s |
+| Wi-Fi | `wlan0` 拿到 IP `192.168.1.72/24`，`CompletedState` |
+| 分区容量 | 与原厂逐位一致（未改 GPT） |
+
+⇒ 结论：**该机型要用 `b`/ab 变体**（与 SAR=是 一致），`a`/aonly 起不来。
+完整数据见 `GSI_SELECTION.md` 第四节。
 
 ## 七、已知残留问题
 
