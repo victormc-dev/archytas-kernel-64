@@ -2051,6 +2051,10 @@ MANIFEST.sha256
 - `port/device_make_vendor64.sh` —— 设备端 vendor 改造脚本
 - `port/build_wifi64_vendor.py` —— 主机驱动：推送 → 设备端构建 → 拉取 → 11 项校验
 - `ext4_read.py` 增补：`Ext4()` 现在也接受**类文件对象**（配合 sparse 适配器）
+- `port/ci_push.py` —— 顺带解决的老问题：本机 `credential.helper=helper-selector` 是**交互式**的，
+  非交互 shell 里 `git push` 会**永久挂住**。该脚本复用 `ci_auth.py` 的取值逻辑，
+  把 token 拼进一次性 URL 并先 `-c credential.helper=` 清空 helper 列表，
+  同时对输出做脱敏（`user:token@github.com` → `github.com`），因此回调也不泄密。
 
 ---
 
