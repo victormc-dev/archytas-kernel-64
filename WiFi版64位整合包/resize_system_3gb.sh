@@ -143,6 +143,18 @@ mkdir -p "$WORK" || die "无法创建 $WORK"
 # ---------------------------------------------------------------------------
 DD_MAX_SECTORS=4194303          # 单段最多搬这些扇区（< 2^31 字节），双重保险
 
+# dd_locate <绝对扇区> —— 在旧分区表 $WORK/tbl.txt（num start end code name，空格分隔）
+# 里找覆盖该 LBA 的分区，输出 "<分区号> <起始扇区> <结束扇区>"。找不到返回非 0。
+# 这是 dd_lba 把"绝对 LBA"换算成"分区节点 + 分区内偏移"的依据。用旧表是刻意的：
+# 改表后内核仍持旧表，而所有"新 LBA"物理上都落在旧 userdata 分区范围内（见 dd_lba 注释）。
+dd_locate() {
+  dl_tgt="$1"
+  while read -r n s e c name; do
+    [ "$dl_tgt" -ge "$s" ] && [ "$dl_tgt" -le "$e" ] && { echo "$n $s $e"; return 0; }
+  done < "$WORK/tbl.txt"
+  return 1
+}
+
 # dd_lba read  <out> <start_sector> <count_sector>
 # dd_lba write <in>  <start_sector> <count_sector>
 # dd_lba zero        <start_sector> <count_sector>
@@ -188,11 +200,14 @@ dd_lba() {
         cat "$WORK/.ddlba_seg" >> "$dl_of" || die "dd_lba read: 拼接失败"
         ;;
       write)
-        $DD if="$dl_of" of="$dl_dev" bs=$SEC skip="$dl_written" seek="$dl_in_off" count="$dl_n" conv=notrunc 2>/dev/null \
+        # ★ 块设备写不需要 conv=notrunc（notrunc 只对普通文件有意义，块设备不会被截断）。
+        #   且 TWRP 3.7.0 的 toybox dd 不支持 conv 选项（报 "conv option disabled"），
+        #   加了反而直接失败。所以这里**绝不加 conv**。
+        $DD if="$dl_of" of="$dl_dev" bs=$SEC skip="$dl_written" seek="$dl_in_off" count="$dl_n" 2>/dev/null \
           || die "dd_lba write @LBA$dl_cur ($dl_dev+$dl_in_off) 失败"
         ;;
       zero)
-        $DD if=/dev/zero of="$dl_dev" bs=$SEC seek="$dl_in_off" count="$dl_n" conv=notrunc 2>/dev/null \
+        $DD if=/dev/zero of="$dl_dev" bs=$SEC seek="$dl_in_off" count="$dl_n" 2>/dev/null \
           || die "dd_lba zero @LBA$dl_cur ($dl_dev+$dl_in_off) 失败"
         ;;
       *) die "dd_lba: 未知模式 '$dl_mode'";;

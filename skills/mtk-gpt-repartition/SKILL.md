@@ -187,8 +187,12 @@ sgdisk \
 **必须走裸盘 + seek**：
 
 ```bash
-dd if=/tmp/x.bin of=/dev/block/mmcblk0 bs=512 seek=<新 LBA> conv=notrunc
+dd if=/tmp/x.bin of=/dev/block/mmcblk0 bs=512 seek=<新 LBA>
 ```
+
+**★ 不要加 `conv=notrunc`**：TWRP 3.7.0 的 toybox dd **不支持 conv 选项**（报
+`conv option disabled` 直接失败），而且块设备写本来就不需要 notrunc（notrunc 只对
+普通文件有意义，块设备不会被截断）。
 
 用 `/dev/block/mmcblk0pNN` 会写到旧位置 → 静默损坏。改完 `sync` 然后 `reboot`，
 让 kernel 重新读表。
@@ -207,11 +211,15 @@ TWRP 的 toybox dd 对 `skip`/`seek` 的「块数 × bs 字节偏移」用**有�
 
 ```bash
 # 例：把 vbmeta 内容写回新 LBA 8093696（落在旧 userdata p34 内，内偏移 2441216）
-dd if=vbmeta.bin of=/dev/block/mmcblk0p34 bs=512 seek=2441216 conv=notrunc
+dd if=vbmeta.bin of=/dev/block/mmcblk0p34 bs=512 seek=2441216
+# ★ 分区节点名是 mmcblk0pNN（带 p 前缀），不是 mmcblk0NN！
+# ★ 不要加 conv=notrunc（toybox dd 不支持 conv，报 "conv option disabled"）
 ```
 
 配套铁律：① 所有读后加 `[ -s 文件 ]` 空输入守卫；② 哈希比对前先确认两边文件非空；
-③ 别对整盘用大 LBA 直接 seek，一律走「分区节点 + 分区内偏移」。
+③ 别对整盘用大 LBA 直接 seek，一律走「分区节点 + 分区内偏移」；④ 分区节点名带 `p`
+前缀（`mmcblk0p32`）；⑤ **函数先定义后调用**（sh 里调用未定义函数报 `not found`，
+曾在真机执行时 `dd_locate: not found` 中途 die）；⑥ 不加 `conv=notrunc`。
 
 ## 7. 完整流程（推荐写成脚本）
 
@@ -243,6 +251,9 @@ dd if=vbmeta.bin of=/dev/block/mmcblk0p34 bs=512 seek=2441216 conv=notrunc
 | 改完表读的还是旧大小 | kernel 分区表是旧的。`reboot`，或改表后的读写走「分区节点 + 分区内偏移」（见 §6b） |
 | 用 `mmcblk0pNN` 写数据损坏了 | 改表后分区节点仍指向旧偏移。但**按新 LBA 写时要反着用**：找覆盖该新 LBA 的**旧**分区节点（见 §6b） |
 | **toybox dd 静默读空/写空（写砖）** | `skip`/`seek` 字节偏移 ≥ 2 GiB 就静默失败。**必须走分区节点+分区内偏移**，读后加 `[ -s ]` 守卫（见 §6b） |
+| `dd: conv option disabled` | TWRP toybox dd **不支持 conv 选项**。块设备写不需要 `conv=notrunc`，直接去掉 conv（见 §6/§6b） |
+| `xxx: not found`（脚本中途 die） | sh 里调用了未定义的函数。**函数必须先定义后调用**；重构时核对每个函数都有定义 |
+| 分区节点 `mmcblk0NN` 不存在 | 节点名带 `p` 前缀，是 `mmcblk0pNN`（`/dev/block/mmcblk0p32`） |
 | `mount -o rw` 报 Invalid argument | `Same superblock, different security settings`。先 `umount` + `losetup -d` 再重挂 |
 | TWRP 的 `dd` 报 `block size '4M': illegal number` | toybox dd 只吃纯数字，**且报错后静默不写**。写 `bs=4194304` |
 | TWRP 的 `losetup -f` 报 `No such device or address` | toybox 的 `-f` 是坏的，显式指定 `/dev/block/loop0..7` |
