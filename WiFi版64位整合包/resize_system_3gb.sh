@@ -169,7 +169,9 @@ dd_lba() {
     dl_num=$(echo "$dl_loc" | awk '{print $1}')
     dl_ps=$(echo "$dl_loc" | awk '{print $2}')      # 分区起始绝对扇区
     dl_pe=$(echo "$dl_loc" | awk '{print $3}')      # 分区结束绝对扇区
-    dl_dev="$DISK$dl_num"
+    # 分区节点命名：mmcblk0pNN（带 p 前缀，实机确认）。注意不能用 by-name，
+    # 因为改表后 by-name 的旧软链仍指向旧偏移，而 pNN 节点随内核分区表走。
+    dl_dev="${DISK}p${dl_num}"
     dl_in_off=$(( dl_cur - dl_ps ))                  # 分区内偏移，恒 < 分区大小 < 2GiB
 
     # 本段最多搬该分区剩余量（不跨分区边界），且 ≤ DD_MAX_SECTORS
