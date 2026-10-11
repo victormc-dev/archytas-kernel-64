@@ -193,6 +193,26 @@ dd if=/tmp/x.bin of=/dev/block/mmcblk0 bs=512 seek=<新 LBA> conv=notrunc
 用 `/dev/block/mmcblk0pNN` 会写到旧位置 → 静默损坏。改完 `sync` 然后 `reboot`，
 让 kernel 重新读表。
 
+### 6b. ★★★ toybox dd 无法越过 2 GiB 偏移（写砖根因，必读）
+
+TWRP 的 toybox dd 对 `skip`/`seek` 的「块数 × bs 字节偏移」用**有符号 32 位**算，
+**≥ 2^31（2 GiB）就 `Invalid argument` 且静默返回 0 字节**。上面那条 `dd ... seek=<新 LBA>`
+在"新 LBA 的字节偏移 > 2 GiB"时（本机新 vbmeta/cache/userdata 起点都 > 2 GiB）**会
+静默写空/读空**，再配上 `2>/dev/null` 和"备份哈希 vs 回读哈希"两边都是空串 ⇒ **假通过**，
+最终重启变砖（2026-10-06 实机事故）。
+
+**正确绕开方式**：把「绝对 LBA」换算成「该 LBA 所在**旧分区节点** + 分区内偏移」，
+分区内偏移从 0 起、恒 < 分区大小 < 2 GiB，dd 永不越界。原理：改表后内核仍持旧表，
+而所有"新 LBA"物理上都落在旧 userdata 分区内，用旧分区表映射物理地址完全正确。
+
+```bash
+# 例：把 vbmeta 内容写回新 LBA 8093696（落在旧 userdata p34 内，内偏移 2441216）
+dd if=vbmeta.bin of=/dev/block/mmcblk0p34 bs=512 seek=2441216 conv=notrunc
+```
+
+配套铁律：① 所有读后加 `[ -s 文件 ]` 空输入守卫；② 哈希比对前先确认两边文件非空；
+③ 别对整盘用大 LBA 直接 seek，一律走「分区节点 + 分区内偏移」。
+
 ## 7. 完整流程（推荐写成脚本）
 
 1. 环境与工具自检；**不在 recovery 就拒绝**（Android 运行时 /data /cache 在用，
@@ -201,8 +221,10 @@ dd if=/tmp/x.bin of=/dev/block/mmcblk0 bs=512 seek=<新 LBA> conv=notrunc
    进 TWRP 时这几个通常是挂着的。
 3. 解析 `sgdisk --print` → 预检连续性 → 算新布局 → **打印计划表**。
 4. 默认 **dry-run**，要写盘才 `APPLY=1`。
-5. 备份：`sgdisk --backup` + 裸备份头/尾各 34 扇区（`dd bs=512 count=34`、
-   `dd bs=512 skip=$(disk_size-34) count=34`）+ 需要保留的分区内容。
+5. 备份：`sgdisk --backup`（完整 GPT，走 sgdisk 内部不经 dd，不受 2 GiB 限制）+
+   裸 GPT 主头 34 扇区（`dd bs=512 count=34`，偏移 0 安全）+ 需要保留的分区内容
+   （vbmeta 等，用「分区节点 + 分区内偏移」读，见 §6b）。**别**备份"裸 GPT 尾"——
+   它跨分区边界且字节偏移 > 2 GiB，toybox dd 会静默读空。
 6. 一把 sgdisk 改表。
 7. `sgdisk --verify` + 重新 `--print` **逐项比对** start/end/name；不符立即 `--load-backup`。
 8. 把备份的内容（如 vbmeta）写回新 LBA，读回 sha256 复核。
@@ -218,8 +240,9 @@ dd if=/tmp/x.bin of=/dev/block/mmcblk0 bs=512 seek=<新 LBA> conv=notrunc
 |---|---|
 | **脚本跑到一半断了** | 脚本放 `/data/local/tmp/`，而它自己 `umount /data` 后 shell 读不到后续内容。**放 `/tmp` 跑** |
 | `sgdisk: invalid option -- p` | TWRP 的裁剪版只认长选项，用 `--print` / `--info=N` |
-| 改完表读的还是旧大小 | kernel 分区表是旧的。`reboot`，或改表后的读写一律 `dd ... seek=` 走裸盘 |
-| 用 `mmcblk0pNN` 写数据损坏了 | 同上：改表后分区节点仍指向旧偏移 |
+| 改完表读的还是旧大小 | kernel 分区表是旧的。`reboot`，或改表后的读写走「分区节点 + 分区内偏移」（见 §6b） |
+| 用 `mmcblk0pNN` 写数据损坏了 | 改表后分区节点仍指向旧偏移。但**按新 LBA 写时要反着用**：找覆盖该新 LBA 的**旧**分区节点（见 §6b） |
+| **toybox dd 静默读空/写空（写砖）** | `skip`/`seek` 字节偏移 ≥ 2 GiB 就静默失败。**必须走分区节点+分区内偏移**，读后加 `[ -s ]` 守卫（见 §6b） |
 | `mount -o rw` 报 Invalid argument | `Same superblock, different security settings`。先 `umount` + `losetup -d` 再重挂 |
 | TWRP 的 `dd` 报 `block size '4M': illegal number` | toybox dd 只吃纯数字，**且报错后静默不写**。写 `bs=4194304` |
 | TWRP 的 `losetup -f` 报 `No such device or address` | toybox 的 `-f` 是坏的，显式指定 `/dev/block/loop0..7` |

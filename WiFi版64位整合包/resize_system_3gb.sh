@@ -114,6 +114,94 @@ if [ -z "$(getprop ro.twrp.version 2>/dev/null)" ] && [ "$FORCE" != 1 ]; then
 fi
 mkdir -p "$WORK" || die "无法创建 $WORK"
 
+# ---------------------------------------------------------------------------
+# ★ dd_lba —— 安全的"按绝对 LBA 读写整盘"，绕开 TWRP toybox dd 的 2 GiB 偏移 bug
+#
+#   事故背景（2026-10-06 实机写砖）：TWRP 3.5.2 的 toybox dd 用**有符号 32 位**整数
+#   表示 skip/seek（单位是**字节**），超过 2^31（2 GiB）就 `Invalid argument` 且
+#   **静默返回 0 字节**。原脚本所有 dd 都带 2>/dev/null，于是 vbmeta 备份读成空、
+#   写回写空、cache/userdata 清零没执行，而"备份哈希 vs 回读哈希"两边都是空串
+#   sha256 ⇒ **假通过**，最终重启后设备变砖。
+#
+#   绕开原理：把"绝对 LBA"映射成「该 LBA 所在**旧分区节点** + 分区内偏移」。分区内
+#   偏移从 0 起、且这里涉及的分区（vbmeta 14 MiB / cache 432 MiB / userdata 清零只
+#   动 4 MiB 头）都远小于 2 GiB，所以 dd 的 skip/seek 永不越界。
+#
+#   为什么用"旧分区表"映射？改表之后，内核仍持有**旧**分区表（脚本改的只是 GPT 元
+#   数据，内核不会自动重读），所以内核里 /dev/block/mmcblk0pNN 的物理范围仍是旧的。
+#   而所有"新 LBA"（新 vbmeta/cache/userdata 的起点）在物理上都落在**旧 userdata 分区**
+#   的物理范围内（新表把这三位整体后移，起点正好依次落在旧 userdata 里）。于是任何
+#   绝对 LBA 都能在旧分区表里找到唯一覆盖它的旧分区节点，换算成"节点 + 分区内偏移"
+#   后读写，物理地址完全正确。
+#
+#   用法：
+#       dd_lba read  <输出文件> <绝对起始扇区> <扇区数>
+#       dd_lba write <输入文件> <绝对起始扇区> <扇区数>
+#       dd_lba zero             <绝对起始扇区> <扇区数>
+#   扇区均为 512B 逻辑扇区。依赖 $WORK/tbl.txt（改表前读出的旧分区表：num start end
+#   code name，空格分隔）。
+# ---------------------------------------------------------------------------
+DD_MAX_SECTORS=4194303          # 单段最多搬这些扇区（< 2^31 字节），双重保险
+
+# dd_lba read  <out> <start_sector> <count_sector>
+# dd_lba write <in>  <start_sector> <count_sector>
+# dd_lba zero        <start_sector> <count_sector>
+#   按"分区节点 + 分区内偏移"读写，绕开 toybox dd 的 2 GiB skip/seek 溢出。
+#   一个操作可能跨越多个分区边界（一般不会，因为 vbmeta/cache/userdata 各自独立），
+#   若跨分区则按每段所属分区逐段搬运。
+dd_lba() {
+  dl_mode="$1"; dl_of="$2"; dl_start="$3"; dl_cnt="$4"
+  dl_remaining="$dl_cnt"; dl_cur="$dl_start"; dl_n=""
+
+  case "$dl_cnt" in ''|*[!0-9]*) die "dd_lba: 扇区数非法 '$dl_cnt'";; esac
+  case "$dl_start" in ''|*[!0-9]*) die "dd_lba: 起始扇区非法 '$dl_start'";; esac
+  [ "$dl_cnt" -gt 0 ] || die "dd_lba: 扇区数必须 > 0（$dl_cnt）"
+
+  if [ "$dl_mode" = read ]; then
+    : > "$dl_of" || die "dd_lba read: 无法创建输出文件 $dl_of"
+  fi
+
+  dl_written=0
+  while [ "$dl_remaining" -gt 0 ]; do
+    # 定位覆盖当前 LBA 的旧分区节点，并算分区内偏移（从 0 起，安全）
+    dl_loc=$(dd_locate "$dl_cur") \
+      || die "dd_lba: 绝对扇区 $dl_cur 不在旧分区表任何分区内（分区表异常？）"
+    dl_num=$(echo "$dl_loc" | awk '{print $1}')
+    dl_ps=$(echo "$dl_loc" | awk '{print $2}')      # 分区起始绝对扇区
+    dl_pe=$(echo "$dl_loc" | awk '{print $3}')      # 分区结束绝对扇区
+    dl_dev="$DISK$dl_num"
+    dl_in_off=$(( dl_cur - dl_ps ))                  # 分区内偏移，恒 < 分区大小 < 2GiB
+
+    # 本段最多搬该分区剩余量（不跨分区边界），且 ≤ DD_MAX_SECTORS
+    dl_segmax=$(( dl_pe - dl_cur + 1 ))
+    if [ "$dl_remaining" -gt "$dl_segmax" ]; then dl_n=$dl_segmax; else dl_n=$dl_remaining; fi
+    if [ "$dl_n" -gt "$DD_MAX_SECTORS" ]; then dl_n=$DD_MAX_SECTORS; fi
+
+    case "$dl_mode" in
+      read)
+        $DD if="$dl_dev" of="$WORK/.ddlba_seg" bs=$SEC skip="$dl_in_off" count="$dl_n" 2>/dev/null \
+          || die "dd_lba read @LBA$dl_cur ($dl_dev+$dl_in_off) 失败"
+        [ -s "$WORK/.ddlba_seg" ] \
+          || die "dd_lba read @LBA$dl_cur 读到 0 字节（分区节点或偏移异常）"
+        cat "$WORK/.ddlba_seg" >> "$dl_of" || die "dd_lba read: 拼接失败"
+        ;;
+      write)
+        $DD if="$dl_of" of="$dl_dev" bs=$SEC skip="$dl_written" seek="$dl_in_off" count="$dl_n" conv=notrunc 2>/dev/null \
+          || die "dd_lba write @LBA$dl_cur ($dl_dev+$dl_in_off) 失败"
+        ;;
+      zero)
+        $DD if=/dev/zero of="$dl_dev" bs=$SEC seek="$dl_in_off" count="$dl_n" conv=notrunc 2>/dev/null \
+          || die "dd_lba zero @LBA$dl_cur ($dl_dev+$dl_in_off) 失败"
+        ;;
+      *) die "dd_lba: 未知模式 '$dl_mode'";;
+    esac
+    dl_written=$(( dl_written + dl_n ))
+    dl_cur=$(( dl_cur + dl_n ))
+    dl_remaining=$(( dl_remaining - dl_n ))
+  done
+  [ "$dl_mode" = read ] && rm -f "$WORK/.ddlba_seg"
+}
+
 hdr "0. 环境"
 echo "  disk      : $DISK"
 echo "  sgdisk    : $SGDISK"
@@ -269,9 +357,13 @@ TS=$(date +%Y%m%d-%H%M%S 2>/dev/null); [ -n "$TS" ] || TS=$$
 BK="$WORK/gpt_backup_$TS.bin"
 "$SGDISK" --backup="$BK" "$DISK" >/dev/null 2>&1 && echo "  GPT 全量备份 -> $BK" \
   || die "GPT 备份失败，中止（未做任何修改）"
-$DD if="$DISK" of="$WORK/gpt_head_$TS.bin" bs=$SEC count=34                        2>/dev/null
-$DD if="$DISK" of="$WORK/gpt_tail_$TS.bin" bs=$SEC skip=$(( DSZ - 34 )) count=34   2>/dev/null
-echo "  裸 GPT 头/尾 -> $WORK/gpt_head_$TS.bin  $WORK/gpt_tail_$TS.bin"
+# GPT 主头在 LBA 0（偏移 0，安全），直接用 dd 备份裸扇区。
+# ★ 注意：不备份"裸 GPT 尾 34 扇区"——它跨 flashinfo 分区边界 + GPT 备份头区域，
+#   且字节偏移 > 2 GiB（toybox dd 会静默读空）。真正的 GPT 完整备份已由上面
+#   `sgdisk --backup` 完成（走 sgdisk 内部，不经 toybox dd，不受 2 GiB 限制）。
+$DD if="$DISK" of="$WORK/gpt_head_$TS.bin" bs=$SEC count=34 2>/dev/null \
+  || die "GPT 主头备份失败"
+echo "  裸 GPT 主头 -> $WORK/gpt_head_$TS.bin"
 
 VB_NS=""; VB_SZ=""
 VB_LINE=$(awk '$7 == "vbmeta"' "$P")
@@ -279,8 +371,11 @@ if [ -n "$VB_LINE" ]; then
   VB_OS=$(echo "$VB_LINE" | awk '{print $2}')
   VB_SZ=$(echo "$VB_LINE" | awk '{print $3 - $2 + 1}')
   VB_NS=$(echo "$VB_LINE" | awk '{print $4}')
-  $DD if="$DISK" of="$WORK/vbmeta_$TS.bin" bs=$SEC skip=$VB_OS count=$VB_SZ 2>/dev/null
-  echo "  vbmeta 内容 -> $WORK/vbmeta_$TS.bin ($VB_SZ 扇区)"
+  dd_lba read "$WORK/vbmeta_$TS.bin" "$VB_OS" "$VB_SZ"
+  # ★ 空输入守卫：toybox dd 越界会静默返回 0 字节，必须显式验证真的读到了内容
+  [ -s "$WORK/vbmeta_$TS.bin" ] \
+    || die "vbmeta 备份失败：读到 0 字节（toybox dd 2GiB 偏移 bug？）。磁盘未做任何修改，可安全退出。"
+  echo "  vbmeta 内容 -> $WORK/vbmeta_$TS.bin ($VB_SZ 扇区，$(wc -c < "$WORK/vbmeta_$TS.bin") 字节)"
 else
   echo "  （计划里没有 vbmeta，跳过其内容备份）"
 fi
@@ -327,12 +422,16 @@ echo "  ok：新表与计划逐项一致"
 # --------------------------------------------------------- 9. 恢复 vbmeta 内容
 if [ -n "$VB_NS" ]; then
   hdr "7. 把 vbmeta 内容写回新位置"
-  $DD if="$WORK/vbmeta_$TS.bin" of="$DISK" bs=$SEC seek="$VB_NS" conv=notrunc 2>/dev/null
+  dd_lba write "$WORK/vbmeta_$TS.bin" "$VB_NS" "$VB_SZ"
   sync
   H1=$($SHA256 "$WORK/vbmeta_$TS.bin" | awk '{print $1}')
-  H2=$($DD if="$DISK" bs=$SEC skip="$VB_NS" count="$VB_SZ" 2>/dev/null | $SHA256 | awk '{print $1}')
+  # ★ 回读也走 dd_lba（绕开 2GiB 偏移），且先验证回读文件非空再算哈希
+  dd_lba read "$WORK/vbmeta_verify_$TS.bin" "$VB_NS" "$VB_SZ"
+  [ -s "$WORK/vbmeta_verify_$TS.bin" ] \
+    || die "vbmeta 回读失败：0 字节（toybox dd 偏移 bug？）。请勿重启，用备份 $BK 恢复分区表。"
+  H2=$($SHA256 "$WORK/vbmeta_verify_$TS.bin" | awk '{print $1}')
   [ "$H1" = "$H2" ] && echo "  vbmeta 已写回 @$VB_NS（sha256 $H1 一致 ✓）" \
-                    || die "vbmeta 写回校验失败（$H1 != $H2）"
+                    || die "vbmeta 写回校验失败（$H1 != $H2）。请勿重启，用备份 $BK 恢复分区表。"
 fi
 
 # --------------------------------------------- 10. 作废 cache / userdata 旧内容
@@ -345,7 +444,7 @@ while read -r n os oe ns ne c name g; do
       # fs 起始 128 MiB 之后，但 ext4 默认**不会**自动回退到备份 sb（那要显式 sb=），
       # 所以无需清。反正这两块数据本来就要丢。
       echo "  清零 $name 新位置开头 @$ns"
-      $DD if=/dev/zero of="$DISK" bs=$SEC seek="$ns" count=8192 conv=notrunc 2>/dev/null
+      dd_lba zero "" "$ns" 8192
       ;;
   esac
 done < "$P"
@@ -358,7 +457,6 @@ echo
 echo "  备份（TWRP 的 $WORK 是 tmpfs，重启即失，需要留档现在 pull 走）："
 echo "    adb pull $BK"
 echo "    adb pull $WORK/gpt_head_$TS.bin"
-echo "    adb pull $WORK/gpt_tail_$TS.bin"
 [ -n "$VB_NS" ] && echo "    adb pull $WORK/vbmeta_$TS.bin"
 echo
 SYS_EXP=$(awk -v nm="$SYS_NAME" '$7 == nm { print ($5-$4+1)*512 }' "$P")
