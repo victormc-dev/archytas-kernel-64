@@ -94,6 +94,19 @@ jobs:
           python3 port/patch_adrp_reloc.py "$GITHUB_WORKSPACE/kernel"
           grep -n "ARCHYTAS_ADRP_RELOC" kernel/arch/arm64/kernel/module.c
 
+      # MUST come before the kernel build: mtk_leds.c is compiled INTO the
+      # kernel (CONFIG_MTK_LEDS=y), so the fix has to be inside Image.gz-dtb.
+      # The red notification LED is routed to the PMIC ISINK1 path by the
+      # stock DTS; mt_led_blink_pmic() only supports 8 discrete periods
+      # (max 60 ms), so any normal notification blink was clamped to
+      # freqsel=28 (~16.7 Hz) and the LED strobed. The patch refuses
+      # out-of-range periods so led_blink_set() falls back to a software
+      # timer blink at the requested period. Idempotent either way.
+      - name: Patch LED driver: refuse PMIC blink periods over 60 ms
+        run: |
+          python3 port/patch_led_pmic_blink.py "$GITHUB_WORKSPACE/kernel"
+          grep -n "ARCHYTAS_LED_PMIC_BLINK" kernel/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
+
       # NOTE on the fast lane (modules_only=true): port/build_connectivity_modules.sh
       # does not build the kernel at all -- it only compiles the four out-of-tree
       # .ko files. The slow part of this workflow has always been Image.gz-dtb above

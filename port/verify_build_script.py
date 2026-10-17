@@ -163,6 +163,45 @@ else:
     check("bad path exits non-zero", bad.returncode != 0, bad.stderr.strip()[:80])
     shutil.rmtree(tmp, ignore_errors=True)
 
+print("\n== 4b. patch_led_pmic_blink.py against real kernel source ==")
+# Same contract as group 4, for the notification-LED fix. The red LED is
+# routed to the PMIC ISINK1 path by the stock DTS, and mt_led_blink_pmic()
+# only supports 8 discrete periods (max 60 ms) -- every normal notification
+# blink used to be clamped to freqsel=28 (~16.7 Hz) and the LED strobed.
+# The patch refuses out-of-range periods and propagates the refusal so the
+# LED core falls back to a software timer blink.
+LED_SRC = (ROOT / "archimedes-kernel-64-main" / "drivers" / "misc" / "mediatek"
+           / "leds" / "mt6765" / "mtk_leds.c")
+LED_PATCHER = ROOT / "port" / "patch_led_pmic_blink.py"
+if not LED_SRC.exists():
+    print("   SKIP (no local kernel source at %s)" % LED_SRC)
+else:
+    tmp = Path(tempfile.mkdtemp())
+    led_rel = Path("drivers/misc/mediatek/leds/mt6765")
+    (tmp / led_rel).mkdir(parents=True)
+    target = tmp / led_rel / "mtk_leds.c"
+    shutil.copy2(LED_SRC, target)
+    before = LED_SRC.read_text(encoding="utf-8", errors="surrogateescape")
+    r1 = subprocess.run([EXE, str(LED_PATCHER), str(tmp)], capture_output=True, text=True)
+    r2 = subprocess.run([EXE, str(LED_PATCHER), str(tmp)], capture_output=True, text=True)
+    after = target.read_text(encoding="utf-8", errors="surrogateescape")
+    check("first run exits 0", r1.returncode == 0, (r1.stdout + r1.stderr).strip())
+    check("second run is a no-op",
+          r2.returncode == 0 and "already patched" in r2.stdout, r2.stdout.strip())
+    check("marker ARCHYTAS_LED_PMIC_BLINK written", "ARCHYTAS_LED_PMIC_BLINK" in after)
+    check("out-of-range period is refused",
+          "pmic_period_array[PMIC_PERIOD_NUM - 1]" in after)
+    check("refusal is propagated at the call site",
+          "return mt_led_blink_pmic(led_data->cust.data," in after)
+    check("one unconditional 'return 0;' removed",
+          after.count("return 0;") == before.count("return 0;") - 1,
+          "%d -> %d" % (before.count("return 0;"), after.count("return 0;")))
+    check("braces stay balanced", after.count("{") == after.count("}"))
+    bad = subprocess.run([EXE, str(LED_PATCHER), str(tmp / "nope")],
+                         capture_output=True, text=True)
+    check("bad path exits non-zero", bad.returncode != 0, bad.stderr.strip()[:80])
+    shutil.rmtree(tmp, ignore_errors=True)
+
 print("\n== 5. workflow: patch step precedes the kernel build ==")
 try:
     import yaml
@@ -178,6 +217,11 @@ try:
     check("patch runs BEFORE the kernel build",
           i_patch is not None and i_kern is not None and i_patch < i_kern,
           "patch=%s kernel=%s" % (i_patch, i_kern))
+    i_led = idx("Patch LED")
+    check("LED patch step exists", i_led is not None)
+    check("LED patch runs BEFORE the kernel build",
+          i_led is not None and i_kern is not None and i_led < i_kern,
+          "led=%s kernel=%s" % (i_led, i_kern))
     check("module step runs AFTER the kernel build",
           i_kern is not None and i_mod is not None and i_kern < i_mod,
           "kernel=%s module=%s" % (i_kern, i_mod))
@@ -734,6 +778,7 @@ check("paths-ignore is attached to push only",
 # worst possible outcome, so this list is the guard rail, not decoration.
 _BUILD_INPUTS = [
     "port/patch_adrp_reloc.py",
+    "port/patch_led_pmic_blink.py",
     "port/patch_wifi_dtb.py",
     "port/make_wifi_template.py",
     "port/elf_symbols.py",
