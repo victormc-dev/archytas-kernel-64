@@ -102,7 +102,7 @@ jobs:
       # freqsel=28 (~16.7 Hz) and the LED strobed. The patch refuses
       # out-of-range periods so led_blink_set() falls back to a software
       # timer blink at the requested period. Idempotent either way.
-      - name: Patch LED driver: refuse PMIC blink periods over 60 ms
+      - name: Patch LED driver so notification blinks fall back to a software timer
         run: |
           python3 port/patch_led_pmic_blink.py "$GITHUB_WORKSPACE/kernel"
           grep -n "ARCHYTAS_LED_PMIC_BLINK" kernel/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
