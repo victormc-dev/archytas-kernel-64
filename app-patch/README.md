@@ -148,6 +148,29 @@ INSTALL_PARSE_FAILED_NO_CERTIFICATES:
 原 APK 只有 **v2/v3 签名**（没有 `META-INF/*.SF`），重打包时**丢弃 zip 里的
 APK Signing Block**（它在中央目录之前，本脚本按其结构天然不复制）。
 
+## RayNeo_AI_1.0.6 处理（2026-10-13）
+
+用同一套流程处理了更新版 **`RayNeo_AI_1.0.6.apk`**（408 MB，4006 条目，
+`com.rayneo.venus.pub`，`minSdk=29` / `targetSdk=36`，字符串池 **UTF-16**）：
+
+| 步骤 | 结果 |
+|---|---|
+| `axml.py` 分析 | 无 `Impeller` 配置；`<application>` 在 chunk@44988 |
+| `inject_impeller.py` | 注入两 meta-data 成功，自检通过 |
+| `repack_v1sign.py` | **首次断言失败**（见下），修复后成功 |
+| 成品 | `rayneo-ai-1.0.6-impeller-off.apk`，409,212,583 B，自检全绿 |
+
+**这次踩到 `repack_v1sign.py` 的一个边界 bug（已修）**：原 padding 公式
+`n = ((-csize) % 4) + 4` 只按**新** manifest 的 csize 算，没有考虑**原**
+manifest 压缩大小的模，当 `原_csize % 4 != 新_csize % 4` 时，总位移
+`Δ = orig_lh_len + 4 + n + csize - orig_block_len` 无法被 4 整除 → 断言
+`Δ 不是 4 的倍数` 失败。1.0.6 恰好命中（Δ%4=1）。
+
+修复：`n ≡ (orig_block_len - orig_lh_len - csize) (mod 4)`（再 `+4` 保证至少
+4 字节数据 padding）。1.0.5 时期 Δ 恰好被旧公式命中，所以没暴露。
+**注：该 bug 是通用的（任何 manifest 替换使 Δ 非 4 倍数都会触发），
+与版本无关，修复已合入 `repack_v1sign.py`。**
+
 ## 可复现的后续
 
 如果想验证"到底是不是 Impeller 的锅"，可以拿任意一个 **API 29+ 上的 Flutter app**

@@ -227,7 +227,13 @@ def main():
             csize, usize = len(data), len(new_manifest)
             orig_extra = zi.extra
             # 追加 padding extra（id 0xd935 = Android zipalign 风格），使总位移 ≡0 (mod 4)
-            n = ((-csize) % 4) + 4
+            # 原实现只按 new_csize 算 n，当 原_csize%4 != new_csize%4 时 Δ 无法整除 4，断言失败
+            # （在 RayNeo_AI_1.0.6 上实测命中）。正确推导：
+            #   new_block_len = orig_lh_len + (4+n) + csize
+            #   Δ = orig_lh_len + 4 + n + csize - orig_block_len
+            #   要 Δ≡0 (mod 4) ⇒ n ≡ (orig_block_len - orig_lh_len - csize) (mod 4)
+            target_n = (orig_block_len - orig_lh_len - csize) % 4
+            n = target_n + 4 if target_n < 4 else target_n   # 保证至少 4 字节数据 padding
             pad = struct.pack("<HH", 0xD935, n) + b"\x00" * n
             lh = build_local_header(orig_lh, name, method, crc, csize, usize, extra_append=pad)
             extra = orig_extra                        # CD 里的 extra 保持原样
