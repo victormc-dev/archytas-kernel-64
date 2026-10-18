@@ -267,7 +267,7 @@ else:
 
     # The real pinned upstream file, when the local _ci cache has it. This is
     # the exact bytes CI checks out, so it is the strongest form of the test.
-    _real = ROOT / "_ci" / "led_d0fbbf77ec.c"
+    _real = ROOT / "_ci" / "led_d0fbbf77ec07.c"
     if _real.exists():
         t, r = _led_case(_real.read_text(encoding="utf-8",
                                          errors="surrogateescape"))
@@ -276,7 +276,7 @@ else:
               (r.stdout + r.stderr).strip())
         shutil.rmtree(t, ignore_errors=True)
     else:
-        print("   SKIP (no _ci/led_d0fbbf77ec.c -- synthetic shapes above cover it)")
+        print("   SKIP (no _ci/led_d0fbbf77ec07.c -- synthetic shapes above cover it)")
 
 print("\n== 4c. patch_wifi_powersave.py against real WLAN source ==")
 # Same contract as groups 4/4b, for the Wi-Fi power-save fix. Android's
@@ -382,13 +382,23 @@ try:
     # 2026-10-18 agui4541 merged our own LED fix back as PR #5, which silently
     # invalidated an unpatched-source anchor and killed run #39095201648 in 31
     # seconds. The checkout must therefore be pinned to a commit we have read.
+    # It is pinned through agui's auto-sha-<10 hex> TAG, not the raw SHA:
+    # github.com refuses `git fetch origin <sha>`, so actions/checkout cannot
+    # fetch a bare commit with fetch-depth: 1 (run #39096304238 died there).
+    # Both halves are asserted: the ref must not be a moving branch, and it must
+    # name the commit we actually intend -- so a typo cannot silently pin a
+    # different tree.
+    PINNED_KERNEL_COMMIT = "d0fbbf77ec07ce227fe4b86000e8b5a6370ad1a0"
     _kstep = next((s for s in steps
                    if "agui4541/archimedes-kernel-64"
                    in str(s.get("with", {}).get("repository", ""))), None)
     _ref = (_kstep or {}).get("with", {}).get("ref", "")
     check("kernel checkout is pinned to a commit, not a moving branch",
-          bool(_kstep) and _ref not in ("", "main", "master") and len(_ref) >= 7,
+          bool(_kstep) and _ref not in ("", "main", "master"),
           "ref=%r" % _ref)
+    check("kernel pin names the intended commit",
+          PINNED_KERNEL_COMMIT[:10] in _ref,
+          "ref=%r does not name %s" % (_ref, PINNED_KERNEL_COMMIT[:10]))
 except ImportError:
     print("   SKIP (pyyaml not installed)")
 

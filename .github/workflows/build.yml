@@ -59,22 +59,29 @@ jobs:
 
       # PINNED on purpose. This is a third-party tree whose `main` moves under
       # us: on 2026-10-18 agui4541 merged our LED fix (PR #4, folded into
-      # main as PR #5, commit d0fbbf77ec), which silently invalidated the
+      # main as PR #5, commit d0fbbf77ec07c), which silently invalidated the
       # unpatched anchor patch_led_pmic_blink.py looks for and killed run
       # #39095201648 within 31 seconds. Reproducibility matters more than
       # auto-tracking here -- a boot image that flashes onto a device must come
       # from a tree whose contents we have actually read.
-      # d0fbbf77ec = "fixed 2 bugs: bad led by victormc-dev & wrong timestamp
-      # by byf" (merge of PR #5): carries the LED software-blink fallback and
-      # the dynamic build timestamp.
+      #   d0fbbf77ec07ce227fe4b86000e8b5a6370ad1a0
+      #   = "fixed 2 bugs: bad led by victormc-dev & wrong timestamp by byf"
+      #     (merge of PR #5): carries the LED software-blink fallback and the
+      #     dynamic build timestamp.
+      # Pinned via agui's auto-sha-<10 hex> TAG rather than the raw SHA:
+      # github.com refuses `git fetch origin <sha>`, so actions/checkout cannot
+      # fetch a bare commit object with fetch-depth: 1 (run #39096304238 died
+      # exactly there). The tag is generated per commit, so it is immutable in
+      # practice, and its name encodes the commit -- which
+      # port/verify_build_script.py cross-checks.
       # To move the pin: fetch agui4541/archimedes-kernel-64, read
       # `git log --oneline <old>..main`, re-run port/verify_build_script.py,
-      # then bump the SHA and the comment together.
+      # then bump the ref and the comment together.
       - name: Checkout 4G 64-bit kernel source (agui4541/archimedes-kernel-64)
         uses: actions/checkout@v4
         with:
           repository: agui4541/archimedes-kernel-64
-          ref: d0fbbf77ec
+          ref: auto-sha-d0fbbf77ec07
           path: kernel
           fetch-depth: 1
 
