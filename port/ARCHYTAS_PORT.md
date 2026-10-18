@@ -1379,6 +1379,17 @@ return 0;
 `kalSetSuspendFlagToEMI` 里 `gConEmiPhyBase` 一直是 0 → 空指针写导致异常，
 可能影响了 FW suspend command 的 reply 路径。
 
+> **2026-10-05 修正（对照 agui 4G vendor 审计，详见 [AGUI_4G_VENDOR_AUDIT.md](AGUI_4G_VENDOR_AUDIT.md)）**：
+> 上面的"空指针写"方向已被源码证伪。`gConEmiPhyBase`（无 Final）**不在模块内定义**——它只在
+> `gl_init.c:191-197` 的 `#if UT_TEST_MODE && CFG_BUILD_X86_PLATFORM` 里定义，arm64 真机上是
+> **UND，由 archimedes 内核 `connectivity_build_in_adapter.c` 的 consys `RESERVEDMEM_OF_DECLARE`
+> 导出**（= `0xbf000000`）。因此 `kalSetSuspendFlagToEMI`（`gl_kal.c:8874`）用的是非空内核基址，
+> EMI 挂起标志被真实写入；即便 CONNINFRA 有意外，`8884` 也会提前 `return`，不会空指针写。
+> 用 `audit_agui_vendor.py -k wlan_drv_gen4m.ko -w wmt_drv.ko` 可一键复核四项不变量。
+> 关键差异其实是：**agui 4G vendor 的模块零 workaround（保留完整 `wlanSetSuspendMode`/`p2pSetSuspendMode`
+> 与 fb `queue_work_on`）且 suspend 正常**，而我们打了 2c-2/2c-3。建议在确认 EMI 挂起标志写入后
+> 摘掉这两个 workaround 恢复真 suspend，而不是继续怀疑 DMA 通道。
+
 ### 刷机验证（CI 新出包后）
 
 ```bash
