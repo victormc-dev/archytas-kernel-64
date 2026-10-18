@@ -21,6 +21,19 @@ adb shell id            # -> uid=0(root) ... context=u:r:su:s0
 
 ## 核心事实
 
+0. **★★ Android 侧写 /vendor 会被 eMMC 写保护静默吞掉（2026-10-18 实测）**。
+   `mmcblk0p30`（vendor）处于 eMMC 写保护状态：`mount -o rw,remount /vendor` 之后
+   `touch` / `adb push` / 当场 `sha256sum` **全部"成功"**（数据只进 page cache），
+   真正落盘时 MMC 层报
+   ```
+   msdc][msdc_command_resp_polling]: msdc0 XXX CMD<13> resp<0x04000900>, write protection violation
+   [mmc_check_write]: data error = -30, status=0x4000900, line:447, block addr:0xf0000
+   ```
+   文件被静默丢弃 ⇒ **重启后原形毕露**（mtime/ctime 都回到旧值，极易误判"补丁没编译对"）。
+   ⇒ **本机所有 /vendor 写入都必须走 TWRP**；`adb push` 到 /vendor 等于没写。
+   唯一可靠的"落盘"判据：`mount -o rw,remount` 写文件 → `sync` → `mount -o ro,remount`
+   （触发 `sync_filesystem`，写失败会连 inode 一起丢）→ 文件还在吗。或 umount 后重挂再读回。
+   TWRP 里 `/vendor` 可正常写：`mount -t ext4 -o rw /dev/block/mmcblk0p30 /vendor` + `cp`。
 1. **TWRP 的 adbd 是 root**（`u:r:su:s0`），可以直接 `dd` 写 `/dev/block/by-name/<part>`。
 2. **`/tmp` 是 tmpfs**，一般 ≈ 内存的一半（1.9 GB 内存 → 994 MiB）。放不下 1.4 GB 的
    system 镜像。⇒ 借 **`/data`** 当落脚点（先 `mke2fs`，反正刷完要清数据）。

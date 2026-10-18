@@ -24,6 +24,15 @@
 #   4) 按原厂顺序 insmod 并验证（lsmod / wlan0 / dmesg）
 #
 # 依赖：adb（默认取 D:/Downloads/platform-tools/adb.exe，可用 ADB 覆盖）
+#
+# ★★ 2026-10-18 实测大坑：/vendor (mmcblk0p30) 受 eMMC 写保护，Android 侧写不进去
+#   `mount -o rw,remount /vendor` 之后 touch / adb push / sha256sum **全部"成功"**
+#   （数据只进了 page cache），真正落盘时 MMC 层报
+#       msdc0 XXX CMD<13> resp<0x04000900>, write protection violation
+#       mmc_check_write: data error = -30 (EROFS), block addr:0xf0000
+#   文件被静默丢弃 ⇒ 重启后原形毕露（mtime/ctime 都回到旧值）。
+#   本脚本第 3 步用"写→sync→重挂 ro→还在吗"做探针，命中即中止并提示走 TWRP。
+#   **TWRP 里 /vendor 可正常写**：mount -t ext4 -o rw /dev/block/mmcblk0p30 /vendor 后 cp。
 # ============================================================================
 set -uo pipefail
 
@@ -74,15 +83,54 @@ if ! "$ADB" shell "touch $DEV_MOD/.wtest 2>/dev/null && rm -f $DEV_MOD/.wtest"; 
   echo "== 手动重挂 /vendor rw ..."
   "$ADB" shell "mount -o remount,rw /vendor"
 fi
-"$ADB" shell "touch $DEV_MOD/.wtest && rm -f $DEV_MOD/.wtest" \
-  || { echo "ERR: /vendor 仍不可写（AVB/verity？）"; exit 1; }
-echo "== /vendor 可写 OK"
+
+# ★ eMMC 写保护探针：touch/push 只看 page cache 会被骗，必须做"落盘"判据。
+#   写文件 → sync → 重挂 ro（触发 sync_filesystem，写失败会连 inode 一起丢）→ 还在吗？
+"$ADB" shell "mount -o rw,remount /vendor" >/dev/null 2>&1
+"$ADB" shell "echo wtest > $DEV_MOD/.wtest; sync" >/dev/null 2>&1
+"$ADB" shell "mount -o ro,remount /vendor" >/dev/null 2>&1
+sleep 1
+if ! "$ADB" shell "test -f $DEV_MOD/.wtest"; then
+  cat >&2 <<'TWRPMSG'
+ERR: /vendor 写入被 eMMC 写保护吞掉 —— 重启后不会生效（详见脚本头 2026-10-18 实测）。
+     本机必须改用 TWRP 安装模块：
+
+        adb reboot recovery
+        adb wait-for-device
+        adb shell "mount -t ext4 -o rw /dev/block/mmcblk0p30 /vendor"
+        adb shell "cp <补丁模块.ko> /vendor/lib/modules/wlan_drv_gen4m.ko; sync"
+        # 卸载后重挂再比一次 sha256，确认真的落在盘上（不是 page cache）
+        adb shell "umount /vendor; mount -t ext4 -o ro /dev/block/mmcblk0p30 /vendor; \
+                   sha256sum /vendor/lib/modules/wlan_drv_gen4m.ko; umount /vendor"
+        adb reboot
+TWRPMSG
+  exit 1
+fi
+"$ADB" shell "rm -f $DEV_MOD/.wtest; mount -o rw,remount /vendor" >/dev/null 2>&1
+echo "== /vendor 可写 OK（已过 eMMC 写保护探针）"
 
 # 4) push 四个模块
 for m in "${MODULES[@]}"; do
   "$ADB" push "$SRC_DIR/$m" "$DEV_MOD/$m" >/dev/null && echo "   pushed $m"
 done
 "$ADB" shell "sync; chmod 0644 $DEV_MOD/*.ko; chown root:root $DEV_MOD/*.ko; ls -la $DEV_MOD/"
+
+# ★ push 完必须做"落盘"复核：重挂 ro 再比 sha256。只看 push 回显/page cache 会骗人
+#   （2026-10-18：push 报成功、sha256 当场对得上，重启后却是旧文件）。
+echo "== 落盘复核（重挂 ro 后读回）..."
+"$ADB" shell "mount -o ro,remount /vendor" >/dev/null 2>&1
+for m in "${MODULES[@]}"; do
+  loc="$(sha256sum "$SRC_DIR/$m" | cut -d' ' -f1)"
+  dev="$("$ADB" shell "sha256sum $DEV_MOD/$m 2>/dev/null" | tr -d '\r' | cut -d' ' -f1)"
+  if [[ -n "$dev" && "$loc" == "$dev" ]]; then
+    echo "   OK   $m  ${loc:0:16}..."
+  else
+    echo "   FAIL $m  local=${loc:0:16} dev=${dev:0:16}"
+    echo "ERR: $m 未真正写入 /vendor（eMMC 写保护）。请走 TWRP，见脚本头。"
+    exit 1
+  fi
+done
+"$ADB" shell "mount -o rw,remount /vendor" >/dev/null 2>&1
 
 # 5) 按原厂顺序 insmod（先 rmmod 旧的，忽略错误）
 echo "== 按原厂顺序加载..."
