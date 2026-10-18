@@ -54,3 +54,53 @@ git clone https://github.com/osm0sis/mkbootimg && cd mkbootimg && make   # 一�
 
 - 屏幕/触摸/按键依赖内核 DTB,64 位内核已内嵌 Wi-Fi DTB,理论上正常;若触摸/按键异常,需回到设备树编译路线。
 - 未验证项:实机刷入与 BiTGApps 刷入。已做结构级验证(架构/fstab/打包字段)。
+
+---
+
+# v2: Actions 全量构建 TWRP 3.7.1 arm64(工具全升级)
+
+2026-10-18 起,改用 **GitHub Actions 全量编译最新 TWRP**,不再用 lotus 3.5.2 旧用户态组装。
+产出的 recovery 内置工具全部为**全新源码编译的 64 位 ELF**(toybox / awk / bc / e2fsck / mke2fs / resize2fs / tune2fs 等)。
+
+## 产物
+
+- release: `twrp-arm64-39117090618`(asset `recovery.img`, 29,554,688 B, md5 `ae3e14565c81db5b990a27fd2000dff6`)
+- 验证:解包 `recovery.img` →
+  - kernel 段 10,475,913 B,与 `boot-archytas-wifi.img` 内核**字节级一致**(gzip Image.gz-dtb,自带 Wi-Fi DTB)
+  - `system/bin/recovery` ELF64 aarch64,版本串 **3.7.1**
+  - `system/bin/{toybox,awk,sh,bc,e2fsck,mke2fs,resize2fs,tune2fs}` 全 ELF64 aarch64
+  - `system/etc/recovery.fstab` = Archytas 35 条 by-name 分区表
+  - 打包字段:base=0x40078000, ramdisk_offset=0x11a88000, tags_offset=0x07808000, header v1, cmdline `bootopt=64S3,32S1,64S1 buildvariant=userdebug`
+
+## 构建方法(全量)
+
+| 部件 | 来源 |
+|---|---|
+| manifest | minimal-manifest-twrp/platform_manifest_twrp_aosp @ **twrp-12.1** |
+| 设备树 | `victormc-dev/twrp_device_xiaomi_Archytas`(fork 自 ZH-XiJun,arm64 改造) |
+| kernel | prebuilt/kernel = boot-archytas-wifi.img 内核段(64 位 Image.gz-dtb) |
+| workflow | `archytas-kernel-64` 仓库 `.github/workflows/twrp-build.yml` |
+
+一键触发:
+
+```bash
+gh workflow run "TWRP Build (Archytas arm64)"
+```
+
+### arm64 改造要点(设备树 fork 的提交)
+
+1. `TARGET_ARCH := arm64`(armv8-a / arm64-v8a),内核换 64 位 Image.gz-dtb,去分离 DTBO
+2. `omni_Archytas.mk` 继承改 `vendor/twrp/config/common.mk`(minimal manifest 无 vendor/omni)
+3. `TARGET_SUPPORTS_64_BIT_APPS := true`(AOSP 12 board_config 检查;32 位开关无效)
+4. **`BOARD_RECOVERYIMAGE_PARTITION_SIZE` 必须定义** —— AOSP 12 靠它设置 `BUILDING_RECOVERY_IMAGE`,缺失 → `recoveryimage` 空目标 → `ninja: no work to do`(recovery.img 不生成,构建假成功)
+5. `TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/recovery.fstab`(装入 `system/etc/recovery.fstab`)
+
+## 实机刷入
+
+```bash
+adb reboot bootloader   # 或设备关机 → 音量- + 电源
+fastboot flash recovery recovery.img
+fastboot reboot recovery   # 直接进 TWRP
+```
+
+> 注:recovery.img 28.2 MiB;若设备 recovery 分区不足,先 `fastboot getvar current-slot`/分区大小确认,必要时刷入 boot 分区配合 `fastboot boot recovery.img`(临时启动,不落盘)。
