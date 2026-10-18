@@ -123,15 +123,11 @@ jobs:
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng
+        echo "=== DEBUG: print key vars ==="
+        make print-BUILDING_RECOVERY_IMAGE print-TARGET_NO_RECOVERY print-BOARD_USES_RECOVERY_AS_BOOT print-BOARD_MOVE_RECOVERY_RESOURCES_TO_VENDOR_BOOT print-INSTALLED_RECOVERYIMAGE_TARGET print-RECOVERY_VARIANT print-TARGET_RECOVERY_ROOT_OUT print-TARGET_RECOVERY_FSTAB 2>&1 | tail -15
         make clean
-        echo "=== DEBUG: env vars ==="
-        echo "TARGET_NO_RECOVERY=$TARGET_NO_RECOVERY BOARD_USES_RECOVERY_AS_BOOT=$BOARD_USES_RECOVERY_AS_BOOT BOARD_RECOVERYIMAGE_PARTITION_SIZE=$BOARD_RECOVERYIMAGE_PARTITION_SIZE"
-        echo "=== DEBUG: combined ninja ==="
-        ls -la out/combined-*.ninja 2>/dev/null || echo "no combined ninja yet"
-        echo "=== DEBUG: recovery targets in ninja ==="
-        ninja -f out/combined-*.ninja -t targets 2>/dev/null | grep -iE "recovery\.img|recoveryimage" | head -5 || echo "ninja file not found"
-        echo "=== DEBUG: product out before ==="
-        ls -la out/target/product/${{ github.event.inputs.DEVICE_NAME }}/ 2>/dev/null | head -15 || echo "no product out"
+        echo "=== DEBUG: ninja files ==="
+        find out -maxdepth 2 -name "*.ninja" 2>/dev/null | head -20
         make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
         echo "=== DEBUG: product out after ==="
         ls -la out/target/product/${{ github.event.inputs.DEVICE_NAME }}/ 2>/dev/null | head -15
