@@ -34,9 +34,25 @@ The LED core already implements the fallback: drivers/leds/led-core.c's
 led_blink_setup() calls led_set_software_blink() when blink_set() fails, so
 the kernel timer blinks the LED at the REQUESTED period.
 
+UPSTREAM ALREADY HAS IT (2026-10-18)
+------------------------------------
+agui4541 merged this exact fix into their own tree as PR #5
+("fixed 2 bugs: bad led by victormc-dev&wrong timestamp by byf", commit
+d0fbbf77ec). They wrote their own comment and did NOT keep our marker, so
+`grep ARCHYTAS_LED_PMIC_BLINK` finds nothing while the source is already
+correct. That is precisely how CI run #39095201648 died: the patcher looked
+for the unpatched anchor, could not find it, and aborted the build.
+
+So idempotency is recognised by BEHAVIOUR, not by our marker alone: if the
+source already refuses >60 ms periods AND propagates that refusal, there is
+nothing to do. The CI gate likewise greps for the two semantic effects
+instead of the marker.
+
 IMPORTANT: this changes the KERNEL, so it must be applied BEFORE the kernel is
 compiled (see .github/workflows/build.yml), and the resulting boot image has
-to be reflashed once. It is idempotent -- safe to run on every build.
+to be reflashed once. It is idempotent -- safe to run on every build, on a
+pristine tree, on our own patched tree, and on a tree where upstream applied
+the equivalent change themselves.
 """
 import re
 import sys
@@ -78,6 +94,27 @@ PROPAGATE_CODE = (
     "\t\t\t\treturn mt_led_blink_pmic(led_data->cust.data,\n"
     "\t\t\t\t\t\t  &nled_tmp_setting);\n")
 
+# --- 3) recognise the same fix when upstream applied it themselves -----------
+# Behaviour, not wording: the two effects that make the LED core fall back to
+# a software blink. Whitespace-tolerant because upstream reformats freely
+# (their variant wraps the condition across two lines). agui4541/PR#5 is the
+# reason this exists -- see the module docstring.
+UPSTREAM_REFUSE = re.compile(
+    r"if\s*\(\(led->blink_on_time\s*\+\s*led->blink_off_time\)\s*>\s*"
+    r"pmic_period_array\[PMIC_PERIOD_NUM\s*-\s*1\]\)")
+UPSTREAM_PROPAGATE = re.compile(r"return\s+mt_led_blink_pmic\s*\(")
+
+
+def upstream_already_fixed(src):
+    """Return a reason string if `src` already refuses slow PMIC blinks.
+
+    Both effects must be present: refusing the period alone is not enough,
+    mt_mt65xx_blink_set() has to propagate the refusal instead of returning 0.
+    """
+    if UPSTREAM_REFUSE.search(src) and UPSTREAM_PROPAGATE.search(src):
+        return "refuses >60 ms periods and propagates the refusal"
+    return None
+
 
 def main():
     if len(sys.argv) != 2:
@@ -92,6 +129,14 @@ def main():
         print("   already patched: %s" % target)
         return 0
 
+    # Upstream may have applied the equivalent change in their own words.
+    # Recognise it and stop: the build must not die on a tree that is already
+    # correct (CI run #39095201648 did exactly that).
+    reason = upstream_already_fixed(src)
+    if reason:
+        print("   already fixed upstream (%s): %s" % (reason, target))
+        return 0
+
     # The CI checkout is LF; a Windows-side copy of the tree may be CRLF.
     # Normalize for matching, restore the original convention on write.
     crlf = "\r\n" in src
@@ -100,14 +145,31 @@ def main():
 
     m = REFUSE_ANCHOR.search(work)
     if not m:
+        # Self-diagnosing failure: show the head of mt_led_blink_pmic() so the
+        # next upstream edit explains itself in the CI log instead of leaving
+        # a bare "the kernel source layout changed" behind.
+        i = work.find("mt_led_blink_pmic(enum")
+        if i < 0:
+            i = work.find("mt_led_blink_pmic(")
+        snippet = ""
+        if i >= 0:
+            snippet = ("\n---- head of mt_led_blink_pmic() as checked out ----\n"
+                       + work[i:i + 420] + "\n----")
         sys.exit("ERROR: could not find the mt_led_blink_pmic() nled_mode "
-                 "guard in %s -- the kernel source layout changed" % target)
+                 "guard in %s -- the kernel source layout changed%s"
+                 % (target, snippet))
     work = work[:m.start()] + m.group(1) + "\n" + REFUSE_CODE + m.group(2) + work[m.end():]
 
     m = PROPAGATE_ANCHOR.search(work)
     if not m:
+        j = work.find("mt_led_blink_pmic(led_data->cust.data,")
+        snippet = ""
+        if j >= 0:
+            snippet = ("\n---- call site as checked out ----\n"
+                       + work[j:j + 220] + "\n----")
         sys.exit("ERROR: could not find the mt_led_blink_pmic() call site in "
-                 "%s -- the kernel source layout changed" % target)
+                 "%s -- the kernel source layout changed%s"
+                 % (target, snippet))
     work = work[:m.start()] + PROPAGATE_CODE + work[m.end():]
 
     out = work.replace("\n", "\r\n") if crlf else work

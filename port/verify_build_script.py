@@ -202,6 +202,82 @@ else:
     check("bad path exits non-zero", bad.returncode != 0, bad.stderr.strip()[:80])
     shutil.rmtree(tmp, ignore_errors=True)
 
+    # --- regression: upstream applied the same fix themselves ---------------
+    # agui4541 merged this fix into their tree as PR #5 (commit d0fbbf77ec,
+    # "fixed 2 bugs: bad led by victormc-dev&wrong timestamp by byf"), in their
+    # own words and WITHOUT our marker. The patcher used to abort the whole
+    # build on that tree: CI run #39095201648 died 31 seconds in with
+    # "could not find the mt_led_blink_pmic() nled_mode guard".
+    # Two guards here:
+    #   (a) the already-fixed shape must be recognised and left byte-identical;
+    #   (b) a HALF-applied tree (refuse without propagate) must still fail, so
+    #       the recognition above can never pass vacuously.
+    # The snippet mirrors agui's actual formatting (condition wrapped over two
+    # lines) rather than ours; if _ci/ holds the real pinned file, test that too.
+    def _led_case(body):
+        t = Path(tempfile.mkdtemp())
+        (t / led_rel).mkdir(parents=True)
+        (t / led_rel / "mtk_leds.c").write_text(body, encoding="utf-8")
+        r = subprocess.run([EXE, str(LED_PATCHER), str(t)],
+                           capture_output=True, text=True)
+        return t, r
+
+    _upstream_fixed_src = "\n".join([
+        "/* agui4541's own wording of the same fix -- no port marker of ours */",
+        "int mt_led_blink_pmic(enum mt65xx_led_pmic pmic_type,",
+        "\t\t      struct nled_setting *led)",
+        "{",
+        "\tif (led->nled_mode != NLED_BLINK)",
+        "\t\treturn -1;",
+        "\tif ((led->blink_on_time + led->blink_off_time) >",
+        "\t    pmic_period_array[PMIC_PERIOD_NUM - 1])",
+        "\t\treturn -1;",
+        "\tLEDS_DEBUG(\"LED index is %d  freqsel=%d\\n\", time_index,",
+        "\t\t   pmic_freqsel_array[time_index]);",
+        "\treturn 0;",
+        "}",
+        "",
+        "int mt_mt65xx_blink_set(struct led_config_data *led_data)",
+        "{",
+        "\t\t\t\treturn mt_led_blink_pmic(led_data->cust.data,",
+        "\t\t\t\t\t\t  &nled_tmp_setting);",
+        "}",
+        ""])
+    _half_src = _upstream_fixed_src.replace(
+        "\t\t\t\treturn mt_led_blink_pmic(led_data->cust.data,\n"
+        "\t\t\t\t\t\t  &nled_tmp_setting);",
+        "\t\t\t\tmt_led_blink_pmic(led_data->cust.data,\n"
+        "\t\t\t\t\t      &nled_tmp_setting);\n"
+        "\t\t\t\treturn 0;")
+
+    t, r = _led_case(_upstream_fixed_src)
+    unchanged = (t / led_rel / "mtk_leds.c").read_text(encoding="utf-8") \
+        == _upstream_fixed_src
+    check("upstream's own copy of the fix is recognised",
+          r.returncode == 0 and "already fixed upstream" in r.stdout,
+          (r.stdout + r.stderr).strip())
+    check("upstream-fixed tree is left byte-identical", unchanged)
+    shutil.rmtree(t, ignore_errors=True)
+
+    t, r = _led_case(_half_src)
+    check("half-applied tree still fails (no vacuous pass)",
+          r.returncode != 0 and "nled_mode guard" in (r.stdout + r.stderr),
+          (r.stdout + r.stderr).strip()[:120])
+    shutil.rmtree(t, ignore_errors=True)
+
+    # The real pinned upstream file, when the local _ci cache has it. This is
+    # the exact bytes CI checks out, so it is the strongest form of the test.
+    _real = ROOT / "_ci" / "led_d0fbbf77ec.c"
+    if _real.exists():
+        t, r = _led_case(_real.read_text(encoding="utf-8",
+                                         errors="surrogateescape"))
+        check("real pinned upstream file is recognised",
+              r.returncode == 0 and "already fixed upstream" in r.stdout,
+              (r.stdout + r.stderr).strip())
+        shutil.rmtree(t, ignore_errors=True)
+    else:
+        print("   SKIP (no _ci/led_d0fbbf77ec.c -- synthetic shapes above cover it)")
+
 print("\n== 4c. patch_wifi_powersave.py against real WLAN source ==")
 # Same contract as groups 4/4b, for the Wi-Fi power-save fix. Android's
 # wpa_supplicant sends NL80211_CMD_SET_POWER_SAVE(enabled) on every
@@ -301,6 +377,18 @@ try:
     check("boot-image packaging is gated on the fast lane",
           any("modules_only" in (s.get("if") or "") and "Package boot" in (s.get("name") or "")
               for s in steps))
+
+    # The kernel tree is a third-party repo whose main moves under us. On
+    # 2026-10-18 agui4541 merged our own LED fix back as PR #5, which silently
+    # invalidated an unpatched-source anchor and killed run #39095201648 in 31
+    # seconds. The checkout must therefore be pinned to a commit we have read.
+    _kstep = next((s for s in steps
+                   if "agui4541/archimedes-kernel-64"
+                   in str(s.get("with", {}).get("repository", ""))), None)
+    _ref = (_kstep or {}).get("with", {}).get("ref", "")
+    check("kernel checkout is pinned to a commit, not a moving branch",
+          bool(_kstep) and _ref not in ("", "main", "master") and len(_ref) >= 7,
+          "ref=%r" % _ref)
 except ImportError:
     print("   SKIP (pyyaml not installed)")
 

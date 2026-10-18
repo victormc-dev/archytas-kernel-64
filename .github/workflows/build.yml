@@ -57,11 +57,24 @@ jobs:
       - name: Checkout this repo (port/ scripts + defconfig + Wi-Fi DTB)
         uses: actions/checkout@v4
 
+      # PINNED on purpose. This is a third-party tree whose `main` moves under
+      # us: on 2026-10-18 agui4541 merged our LED fix (PR #4, folded into
+      # main as PR #5, commit d0fbbf77ec), which silently invalidated the
+      # unpatched anchor patch_led_pmic_blink.py looks for and killed run
+      # #39095201648 within 31 seconds. Reproducibility matters more than
+      # auto-tracking here -- a boot image that flashes onto a device must come
+      # from a tree whose contents we have actually read.
+      # d0fbbf77ec = "fixed 2 bugs: bad led by victormc-dev & wrong timestamp
+      # by byf" (merge of PR #5): carries the LED software-blink fallback and
+      # the dynamic build timestamp.
+      # To move the pin: fetch agui4541/archimedes-kernel-64, read
+      # `git log --oneline <old>..main`, re-run port/verify_build_script.py,
+      # then bump the SHA and the comment together.
       - name: Checkout 4G 64-bit kernel source (agui4541/archimedes-kernel-64)
         uses: actions/checkout@v4
         with:
           repository: agui4541/archimedes-kernel-64
-          ref: main
+          ref: d0fbbf77ec
           path: kernel
           fetch-depth: 1
 
@@ -102,11 +115,21 @@ jobs:
       # (max 60 ms), so any normal notification blink was clamped to
       # freqsel=28 (~16.7 Hz) and the LED strobed. The patch refuses
       # out-of-range periods so led_blink_set() falls back to a software
-      # timer blink at the requested period. Idempotent either way.
+      # timer blink at the requested period. Idempotent either way -- and it
+      # also recognises the tree already carrying upstream's own copy of the
+      # same fix, which is what the pinned commit above does.
       - name: Patch LED driver so notification blinks fall back to a software timer
         run: |
           python3 port/patch_led_pmic_blink.py "$GITHUB_WORKSPACE/kernel"
-          grep -n "ARCHYTAS_LED_PMIC_BLINK" kernel/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
+          # Gate on the two semantic effects, NOT on our marker. Upstream merged
+          # the same fix themselves (agui4541 PR #5), so a marker-only grep fails
+          # on a tree that is already correct -- which is exactly how run
+          # #39095201648 died. Either way the source must now refuse >60 ms
+          # periods and propagate that refusal to the LED core.
+          grep -n "(led->blink_on_time + led->blink_off_time) >" \
+            kernel/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
+          grep -n "return mt_led_blink_pmic(" \
+            kernel/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
 
       # NOTE on the fast lane (modules_only=true): port/build_connectivity_modules.sh
       # does not build the kernel at all -- it only compiles the four out-of-tree
