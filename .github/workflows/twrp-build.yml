@@ -122,7 +122,20 @@ jobs:
       run: |
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
-        lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng && make clean && make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
+        lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng
+        make clean
+        echo "=== DEBUG: env vars ==="
+        echo "TARGET_NO_RECOVERY=$TARGET_NO_RECOVERY BOARD_USES_RECOVERY_AS_BOOT=$BOARD_USES_RECOVERY_AS_BOOT BOARD_RECOVERYIMAGE_PARTITION_SIZE=$BOARD_RECOVERYIMAGE_PARTITION_SIZE"
+        echo "=== DEBUG: combined ninja ==="
+        ls -la out/combined-*.ninja 2>/dev/null || echo "no combined ninja yet"
+        echo "=== DEBUG: recovery targets in ninja ==="
+        ninja -f out/combined-*.ninja -t targets 2>/dev/null | grep -iE "recovery\.img|recoveryimage" | head -5 || echo "ninja file not found"
+        echo "=== DEBUG: product out before ==="
+        ls -la out/target/product/${{ github.event.inputs.DEVICE_NAME }}/ 2>/dev/null | head -15 || echo "no product out"
+        make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
+        echo "=== DEBUG: product out after ==="
+        ls -la out/target/product/${{ github.event.inputs.DEVICE_NAME }}/ 2>/dev/null | head -15
+        find out -name "*.img" 2>/dev/null | head -10
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
     - name: Upload to Release
