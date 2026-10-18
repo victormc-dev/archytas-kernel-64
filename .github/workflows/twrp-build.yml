@@ -123,14 +123,10 @@ jobs:
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng
-        echo "=== DEBUG: print key vars ==="
-        make print-BUILDING_RECOVERY_IMAGE print-TARGET_NO_RECOVERY print-BOARD_USES_RECOVERY_AS_BOOT print-BOARD_MOVE_RECOVERY_RESOURCES_TO_VENDOR_BOOT print-INSTALLED_RECOVERYIMAGE_TARGET print-RECOVERY_VARIANT print-TARGET_RECOVERY_ROOT_OUT print-TARGET_RECOVERY_FSTAB 2>&1 | tail -15
         make clean
-        echo "=== DEBUG: ninja files ==="
-        find out -maxdepth 2 -name "*.ninja" 2>/dev/null | head -20
         make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
-        echo "=== DEBUG: product out after ==="
-        ls -la out/target/product/${{ github.event.inputs.DEVICE_NAME }}/ 2>/dev/null | head -15
+        echo "=== 产物检查 ==="
+        ls -la out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery.img 2>/dev/null || echo "recovery.img 未生成!"
         find out -name "*.img" 2>/dev/null | head -10
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
