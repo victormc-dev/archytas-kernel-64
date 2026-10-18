@@ -490,6 +490,46 @@ else
   echo "WARN: $SCAN_FILE missing; drain barrier NOT added"
 fi
 
+# ---- 2c-5. Keep the WLAN firmware in CAM -- never power save -----------------
+# THE BUG (observed live 2026-10-18, with the Magisk service.d workaround
+# REMOVED): after every `svc wifi enable` -> reconnect,
+#
+#     iw dev wlan0 get power_save   ->  on
+#     ping <device>                 ->  3% loss, min 7 ms, max 3084 ms, avg 598 ms
+#
+# A kprobe on the symbols registered in cfg80211_ops
+# (mtk_cfg_set_power_mgmt / mtk_cfg80211_set_power_mgmt) names both callers:
+#
+#     wpa_supplicant  -> genl_family_rcv_msg/genl_rcv_msg/netlink_rcv_skb
+#                       i.e. Android sends NL80211_CMD_SET_POWER_SAVE(enabled)
+#                       on every association
+#     wifi@1.0-service-> cfg80211_netdev_notifier_call (NETDEV_UP, wlan0 up),
+#                       re-applying the stale wdev->ps value
+#
+# The driver answers both with wlanoidSet802dot11PowerSaveProfile ->
+# nicConfigPowerSaveProfile -> CMD_ID_POWER_SAVE_MODE(Param_PowerModeFast_PSP),
+# so the firmware sleeps between beacons. A userspace daemon can only narrow
+# the window to its poll interval (5 s); it cannot stop the association-time
+# reset, which is exactly when it matters.
+#
+# THE FIX: make both .set_power_mgmt callbacks (STA in gl_cfg80211.c, P2P in
+# gl_p2p_cfg80211.c) force Param_PowerModeCAM and return -EOPNOTSUPP when
+# enabled was requested, so cfg80211's wdev->ps stays false and
+# `iw get power_save` reports off. Idempotent; see
+# port/patch_wifi_powersave.py for the full rationale and for what was
+# deliberately NOT done instead (dropping the op, or patching the OID, which
+# would break the CTIA / TP-test-mode callers).
+echo ">> force CAM in the WLAN .set_power_mgmt callbacks"
+python3 "$PORT/patch_wifi_powersave.py" "$WLAN_DIR" \
+  || { echo "ERROR: power-save patch did not apply"; exit 1; }
+# Source-level gate. The real shipped-bytes gate is Gate #7 below, which looks
+# for the marker string inside the linked .ko.
+for _f in "$WLAN_DIR/os/linux/gl_cfg80211.c" \
+          "$WLAN_DIR/os/linux/gl_p2p_cfg80211.c"; do
+  grep -q "ARCHYTAS_POWER_SAVE_OFF" "$_f" \
+    || { echo "ERROR: ARCHYTAS_POWER_SAVE_OFF missing in $_f"; exit 1; }
+done
+
 # ---- 2d. Force the large code model for every connectivity module -----------
 # WHY: the target kernel is built with CONFIG_ARM64_ERRATUM_843419=y
 # (Cortex-A53 erratum), which selects CONFIG_ARM64_MODULE_CMODEL_LARGE and makes
@@ -1176,6 +1216,28 @@ else
   echo "       Wi-Fi control plane on the first scan/ESS drain."
   echo "       Re-check step 2c-4 (drain barrier) and step 2d-2"
   echo "       (-mpc-relative-literal-loads)."
+  exit 1
+fi
+
+# Gate #7: the power-save fix must be IN THE SHIPPED BYTES.
+#
+# Source-level checks prove nothing about the artifact: `strip -g` (step 5b)
+# drops .debug_* but keeps .rodata, and the patched callbacks carry a
+# DBGLOG string literal whose text is the marker
+#     "ARCHYTAS_POWER_SAVE_OFF: power save requested, forced CAM"
+# so the string really does survive into the .ko the device loads. If it is
+# absent, step 2c-5 did not apply (or a stale .o was linked) and the device
+# would silently go back to sleeping between beacons after every reconnect --
+# exactly the bug that cost 3% loss / avg 598 ms / max 3.1 s.
+echo "=== power-save (CAM) gate (marker must be in wlan_drv_gen4m.ko) ==="
+if grep -aq "ARCHYTAS_POWER_SAVE_OFF" "$OUTDIR/wlan_drv_gen4m.ko"; then
+  echo "   OK: ARCHYTAS_POWER_SAVE_OFF is present in the shipped wlan_drv_gen4m.ko."
+  echo "       -> .set_power_mgmt() forces CAM and refuses enable."
+else
+  echo "ERROR: wlan_drv_gen4m.ko does NOT contain ARCHYTAS_POWER_SAVE_OFF."
+  echo "       The .set_power_mgmt callbacks were not patched (step 2c-5), so"
+  echo "       wpa_supplicant's NL80211_CMD_SET_POWER_SAVE would put the firmware"
+  echo "       back into Fast PSP on every reconnect."
   exit 1
 fi
 

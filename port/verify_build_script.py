@@ -202,6 +202,79 @@ else:
     check("bad path exits non-zero", bad.returncode != 0, bad.stderr.strip()[:80])
     shutil.rmtree(tmp, ignore_errors=True)
 
+print("\n== 4c. patch_wifi_powersave.py against real WLAN source ==")
+# Same contract as groups 4/4b, for the Wi-Fi power-save fix. Android's
+# wpa_supplicant sends NL80211_CMD_SET_POWER_SAVE(enabled) on every
+# association (proven with a kprobe on the cfg80211_ops symbols), which the
+# MTK driver answers with Param_PowerModeFast_PSP -> the firmware sleeps
+# between beacons -> 3% loss / avg 598 ms / max 3084 ms measured. The patcher
+# forces CAM and refuses the enable request in both the STA and P2P callbacks.
+WLAN_SRC = ROOT / "_ci" / "wlan_core_full"
+PS_PATCHER = ROOT / "port" / "patch_wifi_powersave.py"
+if not WLAN_SRC.is_dir():
+    print("   SKIP (no local WLAN source clone at %s)" % WLAN_SRC)
+else:
+    # Read the PRISTINE sources out of the clone's git object store. The
+    # working tree of _ci/wlan_core_full has usually already been patched by
+    # an earlier run, and copying that would make every "the patch did
+    # something" assertion vacuous.
+    def pristine(rel):
+        r = subprocess.run(["git", "-C", str(WLAN_SRC), "show",
+                            "HEAD:" + rel],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit("ERROR: cannot read %s from %s: %s"
+                     % (rel, WLAN_SRC, r.stderr.strip()))
+        return r.stdout
+
+    tmp = Path(tempfile.mkdtemp())
+    rel_dir = Path("os/linux")
+    (tmp / rel_dir).mkdir(parents=True)
+    originals = {}
+    for name in ("gl_cfg80211.c", "gl_p2p_cfg80211.c"):
+        rel = (rel_dir / name).as_posix()
+        originals[name] = pristine(rel)
+        (tmp / rel_dir / name).write_text(
+            originals[name], encoding="utf-8", errors="surrogateescape")
+    r1 = subprocess.run([EXE, str(PS_PATCHER), str(tmp)],
+                        capture_output=True, text=True)
+    r2 = subprocess.run([EXE, str(PS_PATCHER), str(tmp)],
+                        capture_output=True, text=True)
+    sta = (tmp / rel_dir / "gl_cfg80211.c").read_text(
+        encoding="utf-8", errors="surrogateescape")
+    p2p = (tmp / rel_dir / "gl_p2p_cfg80211.c").read_text(
+        encoding="utf-8", errors="surrogateescape")
+    check("first run exits 0", r1.returncode == 0, (r1.stdout + r1.stderr).strip())
+    check("second run is a no-op",
+          r2.returncode == 0 and "already patched" in r2.stdout, r2.stdout.strip())
+    for label, after, before in (
+            ("gl_cfg80211.c", sta, originals["gl_cfg80211.c"]),
+            ("gl_p2p_cfg80211.c", p2p, originals["gl_p2p_cfg80211.c"])):
+        check("%s: marker written" % label, "ARCHYTAS_POWER_SAVE_OFF" in after)
+        check("%s: PSP selection replaced, not just annotated" % label,
+              "Param_PowerModeFast_PSP" in before
+              and "Param_PowerModeFast_PSP" not in after)
+        check("%s: refuses enable" % label,
+              "if (enabled) {" in after and "return -EOPNOTSUPP;" in after)
+        check("%s: the file really grew" % label, len(after) > len(before),
+              "%d -> %d bytes" % (len(before), len(after)))
+        check("%s: braces stay balanced" % label,
+              after.count("{") == after.count("}"))
+        check("%s: nothing else removed" % label,
+              before.count("return 0;") <= after.count("return 0;") + 1)
+    # The STA callback keeps its original `else` branch, so CAM is assigned
+    # twice there; the P2P callback's if/else collapses into one assignment.
+    check("both callbacks force CAM",
+          sta.count("rPowerMode.ePowerMode = Param_PowerModeCAM;") == 2
+          and p2p.count("ePowerMode = Param_PowerModeCAM;") == 1,
+          "sta=%d p2p=%d" % (
+              sta.count("rPowerMode.ePowerMode = Param_PowerModeCAM;"),
+              p2p.count("ePowerMode = Param_PowerModeCAM;")))
+    bad = subprocess.run([EXE, str(PS_PATCHER), str(tmp / "nope")],
+                         capture_output=True, text=True)
+    check("bad path exits non-zero", bad.returncode != 0, bad.stderr.strip()[:80])
+    shutil.rmtree(tmp, ignore_errors=True)
+
 print("\n== 5. workflow: patch step precedes the kernel build ==")
 try:
     import yaml
@@ -780,6 +853,7 @@ _BUILD_INPUTS = [
     "port/patch_adrp_reloc.py",
     "port/patch_led_pmic_blink.py",
     "port/patch_wifi_dtb.py",
+    "port/patch_wifi_powersave.py",
     "port/make_wifi_template.py",
     "port/elf_symbols.py",
     "port/elf_debug_share.py",

@@ -25,7 +25,8 @@ on:
     # -- i.e. docs, this repo's dev-time self-check harness, the CI helper
     # scripts and the offline DTB analysis tools. The build chain (build.yml +
     # build_connectivity_modules.sh) only touches these port/ files:
-    #   patch_adrp_reloc.py, patch_wifi_dtb.py, make_wifi_template.py,
+    #   patch_adrp_reloc.py, patch_led_pmic_blink.py, patch_wifi_dtb.py,
+    #   patch_wifi_powersave.py, make_wifi_template.py,
     #   elf_symbols.py, elf_debug_share.py, build_connectivity_modules.sh,
     #   k61v1_64_archytas_defconfig, wifi_stock.dtb, 4g_stock.dtb
     # so none of the below may appear here. GitHub skips the run only when EVERY
