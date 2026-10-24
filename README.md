@@ -57,6 +57,8 @@ port/
 ├── 4g_oem_dtbo.dtb          # 4G 原厂 overlay
 ├── dtbo_internal.dtb / .dts # Wi-Fi 原厂 dtbo 内部提取的 DTB/overlay
 ├── 4g_stock.dtb / .dts      # archimedes 模板内 4G DTB（供参照）
+├── patch_led_pmic_blink.py              # LED 狂闪修复（PMIC ISINK clamp，源码级幂等补丁）
+├── led_pmic_blink_agui_upstream.patch   # agui 上游最终版 LED/GPIO 修复（对账参考，commit d0fbbf77e）
 └── diff_main_oem.txt / diff_dtbo_oem.txt  # 主 DTB / overlay 全量差异报告
 ```
 

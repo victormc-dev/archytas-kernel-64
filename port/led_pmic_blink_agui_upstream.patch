@@ -1,0 +1,63 @@
+# AGUI upstream GPIO/LED fix -- reference copy for reconciliation (2026-10-24)
+#
+# Source ........ agui4541/archimedes-kernel-64 @ main, commit d0fbbf77e
+#                 ("Merge pull request #5 from agui4541/ledtest",
+#                 fixed 2 bugs: bad led by victormc-dev&wrong timestamp by byf3332)
+# File .......... drivers/misc/mediatek/leds/mt6765/mtk_leds.c  (only GPIO/LED
+#                 change in the whole agui tree; the notification LED is
+#                 routed to the PMIC ISINK1 path, led_mode=0x3/data=0x2 in the
+#                 stock MTK DTS -- a PMIC GPIO current-source channel)
+# History ....... original author is THIS repo's owner (victormc-dev commit
+#                 06645b790, merged upstream via PR #4); agui re-wrote the
+#                 comment and landed it again as PR #5 (d0fbbf77e).
+#
+# Relationship to ./patch_led_pmic_blink.py
+# -----------------------------------------
+# - patch_led_pmic_blink.py  = source-level, idempotent patcher used by CI. It
+#   recognises BOTH its own marker AND the upstream wording (behaviour-based),
+#   so it is safe on a pristine tree, on our patched tree, and on agui's tree.
+# - THIS FILE              = the exact upstream final diff, kept for
+#   reconciliation / diffing. Apply with:
+#       git apply --check port/led_pmic_blink_agui_upstream.patch
+#   (expect "does not apply" on a tree where the equivalent fix is already in,
+#   e.g. agui main or after patch_led_pmic_blink.py ran -- that is the point.)
+#
+# Effect summary: refuse blink periods > 60 ms that the PMIC ISINK register
+# cannot express (instead of silently clamping to ~16.7 Hz -> visible strobe),
+# and propagate that refusal from mt_mt65xx_blink_set() so the LED core falls
+# back to a software timer blink at the requested period.
+
+diff --git a/drivers/misc/mediatek/leds/mt6765/mtk_leds.c b/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
+index ed2caf129..0508f64cc 100644
+--- a/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
++++ b/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
+@@ -582,6 +582,17 @@ int mt_led_blink_pmic(enum mt65xx_led_pmic pmic_type, struct nled_setting *led)
+ 	if (led->nled_mode != NLED_BLINK)
+ 		return -1;
+ 
++	/* Refuse periods the PMIC ISINK hardware cannot express. The blink
++	 * period is limited to the 8 discrete entries in pmic_period_array[]
++	 * (max 60 ms); find_time_index_pmic() clamps anything longer to the
++	 * last entry (freqsel=28 -> ~16.7 Hz), which makes a normal
++	 * notification blink strobe visibly. Returning an error lets the LED
++	 * core fall back to led_set_software_blink() at the requested period.
++	 */
++	if ((led->blink_on_time + led->blink_off_time) >
++	    pmic_period_array[PMIC_PERIOD_NUM - 1])
++		return -1;
++
+ 	LEDS_DEBUG("LED blink on time = %d offtime = %d\n",
+ 		   led->blink_on_time, led->blink_off_time);
+ 	time_index =
+@@ -1004,9 +1015,8 @@ int mt_mt65xx_blink_set(struct led_classdev *led_cdev,
+ 				    led_data->delay_off;
+ 				nled_tmp_setting.blink_on_time =
+ 				    led_data->delay_on;
+-				mt_led_blink_pmic(led_data->cust.data,
+-						  &nled_tmp_setting);
+-				return 0;
++				return mt_led_blink_pmic(led_data->cust.data,
++							  &nled_tmp_setting);
+ 			} else if (!got_wake_lock) {
+ 				__pm_stay_awake(&leds_suspend_lock);
+ 				got_wake_lock = 1;
