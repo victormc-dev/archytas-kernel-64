@@ -162,7 +162,7 @@ jobs:
       # `defconfig` + `modules_prepare` itself (~1-3 min) when the out-tree is cold.
       # Use it when the boot image is already built/flashed and you are iterating on
       # the connectivity drivers only.
-      - name: Build kernel (pure variant, Image.gz-dtb)
+      - name: Build kernel (Image.gz-dtb)
         if: ${{ github.event.inputs.modules_only != 'true' }}
         working-directory: kernel
         env:
@@ -172,10 +172,14 @@ jobs:
           HOSTCFLAGS: "-fcommon -Wno-error"
           HOSTCXXFLAGS: "-fcommon -Wno-error"
           KCFLAGS: "-Wno-error"
+          VARIANT: ${{ github.event.inputs.variant || 'pure' }}
         run: |
           # Replicate build_archimedes.sh's proven steps but with the Archytas defconfig
           # (that script hardcodes the 4G 'archimedes' defconfig name, so we call make directly):
-          # defconfig -> disable KernelSU -> olddefconfig -> Image.gz-dtb
+          # defconfig -> KernelSU on/off per variant -> olddefconfig -> Image.gz-dtb
+          # agui's build_archimedes.sh ksu lane does exactly `scripts/config --enable CONFIG_KSU`
+          # after defconfig (drivers/kernelsu/Kconfig: depends on OVERLAY_FS, which our
+          # defconfig has: CONFIG_OVERLAY_FS=y), so the kernelsu variant mirrors it.
           OUT="$PWD/out-archytas"
           mkdir -p "$OUT/include"
           ln -sfn "$PWD/include/dt-bindings" "$OUT/include/dt-bindings"
@@ -185,7 +189,12 @@ jobs:
           # scripts/config lives in the kernel source tree root (not in O= dir)
           KCONFIG="$PWD/scripts/config"
           [[ -x "$KCONFIG" ]] || KCONFIG="perl $KCONFIG"
-          $KCONFIG --file "$OUT/.config" --disable CONFIG_KSU
+          if [[ "$VARIANT" = kernelsu ]]; then
+            $KCONFIG --file "$OUT/.config" --enable CONFIG_KSU
+          else
+            # Keep the pure lane genuinely free of KernelSU even if the checkout carries it.
+            $KCONFIG --file "$OUT/.config" --disable CONFIG_KSU
+          fi
           make -C "$PWD" O="$OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                HOSTCFLAGS="-fcommon -Wno-error" HOSTCXXFLAGS="-fcommon -Wno-error" olddefconfig
           make -C "$PWD" O="$OUT" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
