@@ -18,6 +18,13 @@ on:
           - stage1
           - stage2
         default: both
+      variant:
+        description: 'Kernel source line: pure (pinned main) or kernelsu (agui kernelsu branch, incl. KernelSU + ksu fixes)'
+        type: choice
+        options:
+          - pure
+          - kernelsu
+        default: pure
   push:
     branches: [ main ]
     # Don't burn an ~11 min runner when a push cannot change the build output.
@@ -77,11 +84,21 @@ jobs:
       # To move the pin: fetch agui4541/archimedes-kernel-64, read
       # `git log --oneline <old>..main`, re-run port/verify_build_script.py,
       # then bump the ref and the comment together.
+      #
+      # variant=kernelsu: track agui's `kernelsu` BRANCH (not a tag). That line
+      # moves fast (KernelSU is re-based there) and agui's auto-sha tags on it
+      # have been force-updated, so a tag pin is unreliable; branch tracking is
+      # the deliberate choice. The kernelsu branch forks BEFORE the LED fix
+      # (merge-base 4aeb891), so patch_led_pmic_blink.py below re-applies it --
+      # its anchor is intact there (verified 2026-10-26). It already carries
+      # CONFIG_KEYBOARD_GPIO, the Wi-Fi DMA fix and KernelSU incl. the ksu
+      # init/execveat/manager fixes (PR #8, b7ae78e). Our own defconfig is
+      # copied over the kernel's, so kernel-side defconfig diffs do not matter.
       - name: Checkout 4G 64-bit kernel source (agui4541/archimedes-kernel-64)
         uses: actions/checkout@v4
         with:
           repository: agui4541/archimedes-kernel-64
-          ref: auto-sha-d0fbbf77ec07
+          ref: ${{ github.event.inputs.variant == 'kernelsu' && 'kernelsu' || 'auto-sha-d0fbbf77ec07' }}
           path: kernel
           fetch-depth: 1
 
