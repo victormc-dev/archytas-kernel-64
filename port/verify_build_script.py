@@ -388,7 +388,7 @@ try:
     # Both halves are asserted: the ref must not be a moving branch, and it must
     # name the commit we actually intend -- so a typo cannot silently pin a
     # different tree.
-    PINNED_KERNEL_COMMIT = "d0fbbf77ec07ce227fe4b86000e8b5a6370ad1a0"
+    PINNED_KERNEL_COMMIT = "4a4e59ed42548cc3af43bf85a2effb503fb8ab58"
     _kstep = next((s for s in steps
                    if "agui4541/archimedes-kernel-64"
                    in str(s.get("with", {}).get("repository", ""))), None)

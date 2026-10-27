@@ -71,10 +71,14 @@ jobs:
       # #39095201648 within 31 seconds. Reproducibility matters more than
       # auto-tracking here -- a boot image that flashes onto a device must come
       # from a tree whose contents we have actually read.
-      #   d0fbbf77ec07ce227fe4b86000e8b5a6370ad1a0
-      #   = "fixed 2 bugs: bad led by victormc-dev & wrong timestamp by byf"
-      #     (merge of PR #5): carries the LED software-blink fallback and the
-      #     dynamic build timestamp.
+      #   4a4e59ed42548cc3af43bf85a2effb503fb8ab58
+      #   = merge of PR #10 (byf3332): adds the BQ25601 charger driver
+      #     (stock-chip init, OTG state, registered BQ driver data); sits on
+      #     top of PR #9 (2200 mAh battery capacity report). Moved by the
+      #     agui-sync cron on 2026-10-28.
+      #   Previous pin d0fbbf77ec = "fixed 2 bugs: bad led by victormc-dev &
+      #     wrong timestamp by byf" (merge of PR #5): LED software-blink
+      #     fallback + dynamic build timestamp; still part of this tree.
       # Pinned via agui's auto-sha-<10 hex> TAG rather than the raw SHA:
       # github.com refuses `git fetch origin <sha>`, so actions/checkout cannot
       # fetch a bare commit object with fetch-depth: 1 (run #39096304238 died
@@ -98,7 +102,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: agui4541/archimedes-kernel-64
-          ref: ${{ github.event.inputs.variant == 'kernelsu' && 'kernelsu' || 'auto-sha-d0fbbf77ec07' }}
+          ref: ${{ github.event.inputs.variant == 'kernelsu' && 'kernelsu' || 'auto-sha-4a4e59ed4254' }}
           path: kernel
           fetch-depth: 1
 
