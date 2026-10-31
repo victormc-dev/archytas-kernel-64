@@ -59,6 +59,8 @@ def main():
     ap.add_argument("--stage", default="both", choices=("both", "stage1", "stage2"))
     ap.add_argument("--wlan-cam", default="1", choices=("1", "0"),
                     help="1 = force CAM (never sleep); 0 = battery-friendly (leave callbacks)")
+    ap.add_argument("--variant", default="pure", choices=("pure", "kernelsu"),
+                    help="kernel source line for the module build")
     ap.add_argument("--ref", default="main")
     args = ap.parse_args()
 
@@ -74,6 +76,7 @@ def main():
             "modules_only": "true" if args.modules_only else "false",
             "build_stage": args.stage,
             "wlan_cam": args.wlan_cam,
+            "variant": args.variant,
         },
     }).encode()
     try:
