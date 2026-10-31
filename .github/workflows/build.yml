@@ -25,6 +25,13 @@ on:
           - pure
           - kernelsu
         default: pure
+      wlan_cam:
+        description: 'WLAN power-save: 1 = force CAM (never sleep, lowest latency, more battery); 0 = leave callbacks intact (battery-friendly)'
+        type: choice
+        options:
+          - '1'
+          - '0'
+        default: '1'
   push:
     branches: [ main ]
     # Don't burn an ~11 min runner when a push cannot change the build output.
@@ -213,6 +220,8 @@ jobs:
           # 1 in the fast lane: the script prepares the out-tree itself (modules_prepare)
           # instead of requiring a full kernel build to have produced it.
           MODULES_ONLY: ${{ github.event.inputs.modules_only == 'true' && '1' || '0' }}
+          # 1 (default) = force CAM / never sleep; 0 = battery-friendly (leave callbacks).
+          WLAN_FORCE_CAM: ${{ github.event.inputs.wlan_cam }}
         run: |
           # Builds the four AArch64 connectivity .ko files (wmt_drv, wmt_chrdev_wifi,
           # wlan_drv_gen4m, bt_drv) from agui's pinned external repos + 4.9 compat patches.

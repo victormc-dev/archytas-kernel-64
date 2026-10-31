@@ -519,16 +519,25 @@ fi
 # port/patch_wifi_powersave.py for the full rationale and for what was
 # deliberately NOT done instead (dropping the op, or patching the OID, which
 # would break the CTIA / TP-test-mode callers).
-echo ">> force CAM in the WLAN .set_power_mgmt callbacks"
-python3 "$PORT/patch_wifi_powersave.py" "$WLAN_DIR" \
-  || { echo "ERROR: power-save patch did not apply"; exit 1; }
-# Source-level gate. The real shipped-bytes gate is Gate #7 below, which looks
-# for the marker string inside the linked .ko.
-for _f in "$WLAN_DIR/os/linux/gl_cfg80211.c" \
-          "$WLAN_DIR/os/linux/gl_p2p_cfg80211.c"; do
-  grep -q "ARCHYTAS_POWER_SAVE_OFF" "$_f" \
-    || { echo "ERROR: ARCHYTAS_POWER_SAVE_OFF missing in $_f"; exit 1; }
-done
+# WLAN_FORCE_CAM: 1 (default) = keep the WLAN firmware in CAM on every
+# association -- lowest latency but the radio never power-saves, so battery
+# drain is higher. 0 = leave the driver's .set_power_mgmt callbacks untouched
+# so Android can put the firmware into Fast-PSP between beacons (battery-friendly).
+WLAN_FORCE_CAM="${WLAN_FORCE_CAM:-1}"
+if [ "$WLAN_FORCE_CAM" = "1" ]; then
+  echo ">> force CAM in the WLAN .set_power_mgmt callbacks"
+  python3 "$PORT/patch_wifi_powersave.py" "$WLAN_DIR" \
+    || { echo "ERROR: power-save patch did not apply"; exit 1; }
+  # Source-level gate. The real shipped-bytes gate is Gate #7 below, which looks
+  # for the marker string inside the linked .ko.
+  for _f in "$WLAN_DIR/os/linux/gl_cfg80211.c" \
+            "$WLAN_DIR/os/linux/gl_p2p_cfg80211.c"; do
+    grep -q "ARCHYTAS_POWER_SAVE_OFF" "$_f" \
+      || { echo "ERROR: ARCHYTAS_POWER_SAVE_OFF missing in $_f"; exit 1; }
+  done
+else
+  echo ">> WLAN_FORCE_CAM=0 -> leaving WLAN power-save callbacks untouched (battery-friendly build)"
+fi
 
 # ---- 2d. Force the large code model for every connectivity module -----------
 # WHY: the target kernel is built with CONFIG_ARM64_ERRATUM_843419=y
@@ -1229,16 +1238,28 @@ fi
 # absent, step 2c-5 did not apply (or a stale .o was linked) and the device
 # would silently go back to sleeping between beacons after every reconnect --
 # exactly the bug that cost 3% loss / avg 598 ms / max 3.1 s.
-echo "=== power-save (CAM) gate (marker must be in wlan_drv_gen4m.ko) ==="
-if grep -aq "ARCHYTAS_POWER_SAVE_OFF" "$OUTDIR/wlan_drv_gen4m.ko"; then
-  echo "   OK: ARCHYTAS_POWER_SAVE_OFF is present in the shipped wlan_drv_gen4m.ko."
-  echo "       -> .set_power_mgmt() forces CAM and refuses enable."
+echo "=== power-save (CAM) gate ==="
+if [ "${WLAN_FORCE_CAM:-1}" = "1" ]; then
+  # Battery-unfriendly default: the marker MUST be present in the shipped .ko.
+  if grep -aq "ARCHYTAS_POWER_SAVE_OFF" "$OUTDIR/wlan_drv_gen4m.ko"; then
+    echo "   OK: ARCHYTAS_POWER_SAVE_OFF is present in the shipped wlan_drv_gen4m.ko."
+    echo "       -> .set_power_mgmt() forces CAM and refuses enable."
+  else
+    echo "ERROR: wlan_drv_gen4m.ko does NOT contain ARCHYTAS_POWER_SAVE_OFF."
+    echo "       The .set_power_mgmt callbacks were not patched (step 2c-5), so"
+    echo "       wpa_supplicant's NL80211_CMD_SET_POWER_SAVE would put the firmware"
+    echo "       back into Fast PSP on every reconnect."
+    exit 1
+  fi
 else
-  echo "ERROR: wlan_drv_gen4m.ko does NOT contain ARCHYTAS_POWER_SAVE_OFF."
-  echo "       The .set_power_mgmt callbacks were not patched (step 2c-5), so"
-  echo "       wpa_supplicant's NL80211_CMD_SET_POWER_SAVE would put the firmware"
-  echo "       back into Fast PSP on every reconnect."
-  exit 1
+  # Battery-friendly build (WLAN_FORCE_CAM=0): the marker MUST be absent.
+  if grep -aq "ARCHYTAS_POWER_SAVE_OFF" "$OUTDIR/wlan_drv_gen4m.ko"; then
+    echo "WARNING: WLAN_FORCE_CAM=0 but ARCHYTAS_POWER_SAVE_OFF is present --"
+    echo "         the power-save patch leaked in; WLAN power saving will not work."
+  else
+    echo "   OK: ARCHYTAS_POWER_SAVE_OFF absent (battery-friendly build)."
+    echo "       -> .set_power_mgmt() left intact; Android may power-save the WLAN."
+  fi
 fi
 
 # Hard gate for the ONLY thing that makes those modules loadable: the target
