@@ -57,8 +57,9 @@ jobs:
     - name: Prepare the environment
       run: |
         sudo apt update && sudo apt upgrade -y
+        # linux-modules-extra 非 AOSP 构建必需;runner 内核版本与 apt 源不同步时缺失会失败,故可选安装
+        DEBIAN_FRONTEND=noninteractive sudo apt install -yq linux-modules-extra-$(uname -r) || echo "SKIP: linux-modules-extra-$(uname -r) not available, continuing"
         DEBIAN_FRONTEND=noninteractive sudo apt install -yq \
-            linux-modules-extra-$(uname -r) \
             gperf gcc-multilib gcc-10-multilib g++-multilib g++-10-multilib \
             libc6-dev lib32ncurses-dev x11proto-core-dev libx11-dev tree lib32z-dev libgl1-mesa-dev libxml2-utils \
             xsltproc bc ccache lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev \
